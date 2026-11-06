@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/WenPaul/cpa-plugin-step2api/internal/pluginabi"
+	"github.com/WenPaul/cpa-plugin-step2api/internal/pluginapi"
 )
 
 type HostCallFunc func(method string, payload []byte) ([]byte, error)
@@ -17,6 +18,27 @@ type loginSessionState struct {
 	StateID   string
 	Done      bool
 	Account   *AuthFilePayload
+}
+
+type rpcRegistration struct {
+	SchemaVersion uint32             `json:"schema_version"`
+	Metadata      pluginapi.Metadata `json:"metadata"`
+	Capabilities  rpcCapabilities    `json:"capabilities"`
+}
+
+type rpcCapabilities struct {
+	ModelProvider          bool                         `json:"model_provider"`
+	AuthProvider           bool                         `json:"auth_provider"`
+	Scheduler             bool                         `json:"scheduler"`
+	ModelRouter           bool                         `json:"model_router"`
+	Executor              bool                         `json:"executor"`
+	ExecutorModelScope     pluginapi.ExecutorModelScope `json:"executor_model_scope,omitempty"`
+	ExecutorInputFormats   []string                     `json:"executor_input_formats,omitempty"`
+	ExecutorOutputFormats  []string                     `json:"executor_output_formats,omitempty"`
+	RequestLifecyclePlugin bool                         `json:"request_lifecycle_plugin"`
+	CommandLinePlugin      bool                         `json:"command_line_plugin"`
+	ManagementAPI          bool                         `json:"management_api"`
+	QuotaProvider          bool                         `json:"quota_provider"`
 }
 
 type Plugin struct {
@@ -120,22 +142,36 @@ func (p *Plugin) handleRegister(raw []byte) (any, error) {
 		}
 	}
 
-	return map[string]any{
-		"schema_version": pluginabi.SchemaVersion,
-		"metadata": map[string]any{
-			"id":          PluginID,
-			"name":        PluginName,
-			"version":     Version,
-			"author":      "WenPaul",
-			"description": "StepFun AI Studio (studio.stepfun.com) native CLIProxyAPI plugin. Proxies StepFun Playground & Reasoning models into OpenAI/Claude/Responses compatible endpoints.",
+	return rpcRegistration{
+		SchemaVersion: pluginabi.SchemaVersion,
+		Metadata: pluginapi.Metadata{
+			Name:             PluginID,
+			Version:          Version,
+			Author:           "WenPaul",
+			GitHubRepository: "https://github.com/wenbaolu6666-design/cpa-plugin-step2api",
+			ConfigFields: []pluginapi.ConfigField{
+				{
+					Name:        "base_url",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Default:     "https://studio.stepfun.com",
+					Description: "StepFun AI Studio base URL",
+				},
+				{
+					Name:        "default_effort",
+					Type:        pluginapi.ConfigFieldTypeEnum,
+					Default:     "medium",
+					EnumValues:  []string{"low", "medium", "high", "xhigh"},
+					Description: "Default thinking effort level for reasoning models",
+				},
+			},
 		},
-		"capabilities": map[string]any{
-			"model_provider": true,
-			"model_router":   true,
-			"auth_provider":  true,
-			"executor":       true,
-			"quota_provider": true,
-			"management_api": true,
+		Capabilities: rpcCapabilities{
+			ModelProvider: true,
+			ModelRouter:   true,
+			AuthProvider:  true,
+			Executor:       true,
+			QuotaProvider: true,
+			ManagementAPI: true,
 		},
 	}, nil
 }
