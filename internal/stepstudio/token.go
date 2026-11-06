@@ -194,3 +194,35 @@ func RefreshToken(ctx context.Context, client *http.Client, baseURL, oasisToken,
 
 	return oasisToken, nil
 }
+
+// ExtractCookieTokens extracts (Oasis-Token, Oasis-Webid) from a raw token or full Cookie header.
+func ExtractCookieTokens(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(strings.ToLower(raw), "cookie:") {
+		raw = strings.TrimSpace(raw[7:])
+	}
+	token := ""
+	webid := ""
+	parts := strings.Split(strings.ReplaceAll(raw, "\n", ";"), ";")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || !strings.Contains(part, "=") {
+			continue
+		}
+		kv := strings.SplitN(part, "=", 2)
+		name := strings.ToLower(strings.TrimSpace(kv[0]))
+		val := strings.TrimSpace(kv[1])
+		if name == "oasis-token" {
+			token = val
+		} else if name == "oasis-webid" {
+			webid = val
+		}
+	}
+	if token == "" {
+		token = raw
+	}
+	if webid == "" {
+		webid = ExtractDeviceID(token)
+	}
+	return token, webid
+}
