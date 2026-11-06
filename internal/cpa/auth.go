@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -65,7 +67,7 @@ func (p *Plugin) handleAuthParse(raw []byte) (any, error) {
 
 	token := strings.TrimSpace(payload.OasisToken)
 	if token == "" && len(req.RawJSON) > 0 {
-		token = strings.Trim(string(req.RawJSON), "\" \t\r\n")
+		token, _ = stepstudio.ExtractCookieTokens(string(req.RawJSON))
 	}
 
 	accID := payload.AccountID
@@ -116,7 +118,7 @@ func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
 	}
 	p.loginStateMu.Unlock()
 
-	loginURL := "https://studio.stepfun.com/"
+	loginURL := "http://127.0.0.1:8317/v0/resource/plugins/step2api/accounts"
 	return pluginapi.AuthLoginStartResponse{
 		Provider:  ProviderID,
 		URL:      loginURL,
@@ -140,7 +142,7 @@ func (p *Plugin) handleAuthLoginPoll(raw []byte) (any, error) {
 			Status:  pluginapi.AuthLoginStatusError,
 			Message: "login session expired or not found",
 		}, nil
-	}
+}
 
 	if session.Done && session.Account != nil {
 		return pluginapi.AuthLoginPollResponse{
@@ -159,9 +161,34 @@ func (p *Plugin) handleAuthLoginPoll(raw []byte) (any, error) {
 		}, nil
 	}
 
+	// Also check if any auth file was written to oauth dir
+	oauthDir := resolveOAuthDir()
+	if files, err := filepath.Glob(filepath.Join(oauthDir, "step2api-*.json")); err == nil && len(files) > 0 {
+		latest := files[len(files)-1]
+		if data, err := os.ReadFile(latest); err == nil {
+			var item AuthFilePayload
+			if err := json.Unmarshal(data, &item); err == nil && item.OasisToken != "" {
+				return pluginapi.AuthLoginPollResponse{
+					Status:  pluginapi.AuthLoginStatusSuccess,
+					Message: "StepFun 凭据已成功加载: " + item.AccountID,
+					Auth: pluginapi.AuthData{
+						Provider: ProviderID,
+						ID:       item.AccountID,
+						Label:    "StepFun Studio (" + item.AccountID + ")",
+						Metadata: map[string]any{
+							"account_id":  item.AccountID,
+							"oasis_token": item.OasisToken,
+							"web_id":      item.WebID,
+						},
+					},
+				}, nil
+			}
+		}
+	}
+
 	return pluginapi.AuthLoginPollResponse{
 		Status:  pluginapi.AuthLoginStatusPending,
-		Message: "等待登录中...",
+		Message: "等待导入 Cookie 或 Oasis-Token...",
 	}, nil
 }
 
