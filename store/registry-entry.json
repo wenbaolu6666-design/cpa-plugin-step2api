@@ -1,0 +1,20 @@
+{
+  "id": "step2api",
+  "name": "Step2API",
+  "description": "StepFun AI Studio (studio.stepfun.com) native CLIProxyAPI plugin. Proxies StepFun Playground models (step-3.5-flash, step-3.7-flash, step-5-preview) via native SSE stream with thinking, tools, multi-account pool and token auto-refresh.",
+  "author": "WenPaul",
+  "version": "1.0.0",
+  "license": "MIT",
+  "tags": [
+    "Provider",
+    "Executor",
+    "Scheduler",
+    "Management",
+    "StepFun"
+  ],
+  "locales": {
+    "zh-CN": {
+      "description": "StepFun AI Studio (studio.stepfun.com) 的 CLIProxyAPI 原生插件。将阶跃星辰网页端漫游与思考模型（step-3.5-flash、step-3.7-flash、step-5-preview）反代为 OpenAI/Claude 兼容接口，支持 Token 自动续期、思考模型流式透传与多账号轮询。"
+    }
+  }
+}
