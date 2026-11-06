@@ -116,7 +116,7 @@ func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
 	}
 	p.loginStateMu.Unlock()
 
-	loginURL := "https://studio.stepfun.com/login"
+	loginURL := "https://studio.stepfun.com/"
 	return pluginapi.AuthLoginStartResponse{
 		Provider:  ProviderID,
 		URL:      loginURL,
