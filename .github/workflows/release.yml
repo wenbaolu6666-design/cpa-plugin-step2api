@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PLUGIN_ID: step2api
+
+jobs:
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            os: macos-14
+            ext: .dylib
+          - goos: darwin
+            goarch: amd64
+            os: macos-13
+            ext: .dylib
+          - goos: linux
+            goarch: amd64
+            os: ubuntu-24.04
+            ext: .so
+          - goos: windows
+            goarch: amd64
+            os: windows-2025
+            ext: .dll
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Test
+        run: go test -v ./...
+
+      - name: Build Shared Library
+        shell: bash
+        run: |
+          mkdir -p dist
+          export CGO_ENABLED=1
+          export GOOS=${{ matrix.goos }}
+          export GOARCH=${{ matrix.goarch }}
+          go build -buildmode=c-shared -trimpath -ldflags "-s -w" -o dist/${PLUGIN_ID}_${GITHUB_REF_NAME#v}_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }} ./cmd/step2api-plugin
+
+      - name: Package Zip
+        shell: bash
+        run: |
+          cd dist
+          target="${PLUGIN_ID}_${GITHUB_REF_NAME#v}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -j "${target}.zip" "${target}.dll"
+          elif [ "${{ matrix.goos }}" = "darwin" ]; then
+            zip -j "${target}.zip" "${target}.dylib"
+          else
+            zip -j "${target}.zip" "${target}.so"
+          fi
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/*.zip

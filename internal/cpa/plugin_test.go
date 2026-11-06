@@ -16,8 +16,8 @@ func TestPluginLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
-	regMap, ok := res.(map[string]any)
-	if !ok || regMap["schema_version"] != pluginabi.SchemaVersion {
+	reg, ok := res.(rpcRegistration)
+	if !ok || reg.SchemaVersion != pluginabi.SchemaVersion || reg.Metadata.GitHubRepository == "" {
 		t.Errorf("unexpected register response: %v", res)
 	}
 
