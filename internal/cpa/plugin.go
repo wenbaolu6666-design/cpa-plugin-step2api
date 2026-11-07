@@ -118,10 +118,17 @@ func (p *Plugin) HandleMethod(method string, raw []byte) (any, error) {
 	case pluginabi.MethodQuotaDescribe, pluginabi.MethodQuotaFetch:
 		return p.handleQuotaStatus(raw)
 
+	case pluginabi.MethodCommandLineRegister:
+		return p.handleCLIRegister()
+	case pluginabi.MethodCommandLineExecute:
+		return p.handleCLIRun(raw)
+
 	case pluginabi.MethodManagementRegister:
 		return p.handleManagementRegister(raw)
 	case pluginabi.MethodManagementHandle:
 		return p.handleManagementHandle(raw)
+	case pluginabi.MethodRequestComplete:
+		return map[string]any{"completed": true}, nil
 
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
@@ -166,30 +173,23 @@ func (p *Plugin) handleRegister(raw []byte) (any, error) {
 			},
 		},
 		Capabilities: rpcCapabilities{
-			ModelProvider: true,
-			ModelRouter:   true,
-			AuthProvider:  true,
-			Executor:       true,
-			QuotaProvider: true,
-			ManagementAPI: true,
+			ModelProvider:          true,
+			ModelRouter:           true,
+			AuthProvider:           true,
+			Executor:              true,
+			ExecutorModelScope:     pluginapi.ExecutorModelScopeOAuth,
+			ExecutorInputFormats:   []string{"chat-completions", "responses", "anthropic"},
+			ExecutorOutputFormats:  []string{"chat-completions", "responses", "anthropic"},
+			RequestLifecyclePlugin: true,
+			CommandLinePlugin:      true,
+			ManagementAPI:          true,
+			QuotaProvider:          true,
 		},
 	}, nil
 }
 
 func (p *Plugin) handleReload(raw []byte) (any, error) {
-	if len(raw) > 0 {
-		var in struct {
-			ConfigYAML []byte `json:"config_yaml"`
-		}
-		if err := json.Unmarshal(raw, &in); err == nil && len(in.ConfigYAML) > 0 {
-			if cfg, err := ParsePluginConfig(in.ConfigYAML); err == nil {
-				p.mu.Lock()
-				p.config = cfg
-				p.mu.Unlock()
-			}
-		}
-	}
-	return map[string]any{"reloaded": true}, nil
+	return p.handleRegister(raw)
 }
 
 func (p *Plugin) callHost(method string, req any) ([]byte, error) {
