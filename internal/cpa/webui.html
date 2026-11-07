@@ -266,8 +266,8 @@ function render() {
     ["输出 Tokens", fmtNum(summary.tokens_out), ""],
     ["缓存命中", fmtNum(summary.cached_tokens), ""],
     ["错误", fmtNum(summary.errors), "次"],
-    ["免费额度", quota.free_rate == null ? "—" : (quota.free_rate * 100).toFixed(1), "%"],
-    ["5h 剩余", quota.five_hour_usage_left_rate == null ? "—" : (quota.five_hour_usage_left_rate * 100).toFixed(0), "%"],
+    
+    ["Plus 套餐月池", quota.plan_residual_percent != null ? quota.plan_residual_percent : "—", "%"], ["Studio 免费额度", quota.free_rate != null ? (quota.free_rate * 100).toFixed(1) : "—", "%"], ["现金余额", quota.balance != null ? "¥" + quota.balance.toFixed(2) : "—", ""], ["累计消费", quota.cost_total != null ? "¥" + quota.cost_total.toFixed(2) : "—", ""],
   ].map(([k, v, u]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}<small>${u}</small></div></div>`).join("");
 
   $("accounts").innerHTML = accounts.length ? accounts.map(a => {
@@ -391,17 +391,18 @@ document.addEventListener("click", async (ev) => {
     const act = btn.dataset.act, id = btn.dataset.id;
     if (act === "delete") {
       if (!confirm("确定删除该账号？")) return;
-      await api("/v0/management/step2api/api/accounts/" + id, {method: "DELETE"});
+      const r = await api("/v0/management/step2api/api/accounts/delete", {method: "POST", body: JSON.stringify({id})});
+      toast(r.message || "账号已删除");
     } else if (act === "disable" || act === "enable") {
-      await api("/v0/management/step2api/api/accounts/" + id, {method: "PATCH", body: JSON.stringify({disabled: act === "disable"})});
-      toast(act === "disable" ? "已停用" : "已启用");
+      const r = await api("/v0/management/step2api/api/accounts/disable", {method: "POST", body: JSON.stringify({id, disabled: act === "disable"})});
+      toast(r.message || (act === "disable" ? "已停用" : "已启用"));
     } else if (act === "test") {
       const r = await api("/v0/management/step2api/api/accounts/test", {method: "POST", body: JSON.stringify({id})});
-      toast(r.ok ? (r.re_enabled ? "连通正常，已解除停用" : "连通正常") : ("失败：" + r.detail), !r.ok);
+      toast(r.ok ? (r.message || "连通正常，StepFun 链路健康！") : ("测试失败：" + (r.detail || r.error)), !r.ok);
       await refresh(); return;
     } else if (act === "refresh") {
-      const r = await api("/v0/management/step2api/api/accounts/" + id + "/refresh", {method: "POST", body: "{}"});
-      toast(r.ok ? "Token 已续期" : ("续期失败：" + r.detail), !r.ok);
+      const r = await api("/v0/management/step2api/api/accounts/refresh", {method: "POST", body: JSON.stringify({id})});
+      toast(r.ok ? (r.message || "Token 已成功续期！") : ("续期失败：" + (r.detail || r.error)), !r.ok);
       await refresh(); return;
     }
     await refresh();

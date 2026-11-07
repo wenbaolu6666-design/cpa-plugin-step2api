@@ -1,6 +1,9 @@
 package cpa
 
 import (
+	"context"
+	"math"
+	"strconv"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -91,6 +94,7 @@ func (p *Plugin) handleManagementRegister(raw []byte) (any, error) {
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/delete", Description: "Delete StepFun account"},
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/test", Description: "Test StepFun account connectivity"},
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/refresh", Description: "Refresh all StepFun account tokens"},
+			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/disable", Description: "Disable or enable StepFun account"},
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/sync", Description: "Sync StepFun accounts to host auths"},
 		},
 		Resources: []pluginapi.ResourceRoute{
@@ -190,18 +194,104 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			})
 		}
 
+		var quotaData map[string]any
+		if len(accountsList) > 0 {
+			firstTok := ""
+			firstWebID := ""
+			if t, ok := accountsList[0]["token"].(string); ok {
+				firstTok = t
+			}
+			if w, ok := accountsList[0]["webid"].(string); ok {
+				firstWebID = w
+			}
+			if firstTok != "" {
+				mCtx, cancel := context.WithTimeout(p.ctx, 4*time.Second)
+				defer cancel()
+				client := stepstudio.NewClient(p.config.BaseURL, firstTok, firstWebID, nil)
+				rateLimit, _ := client.QueryRateLimit(mCtx)
+				platformPlan, _ := client.QueryStepPlanRateLimit(mCtx)
+				accountBal, _ := client.QueryAccountBalance(mCtx)
+
+				freeRate := 1.0
+				if rateLimit != nil {
+					freeRate = rateLimit.FreeRate
+				}
+				planResidualPct := 0.0
+				if platformPlan != nil && platformPlan.PlanCreditRateLimit != nil {
+					planResidualPct = math.Round(platformPlan.PlanCreditRateLimit.SubscriptionCreditLeftRate*10000) / 100
+				}
+				balanceYuan := 0.0
+				costTotalYuan := 0.0
+				if accountBal != nil {
+					if bVal, err := strconv.ParseFloat(accountBal.Balance, 64); err == nil {
+						balanceYuan = bVal / 100.0
+					}
+					if cVal, err := strconv.ParseFloat(accountBal.CostTotal, 64); err == nil {
+						costTotalYuan = cVal / 100.0
+					}
+				}
+				quotaData = map[string]any{
+					"free_rate":             freeRate,
+					"plan_residual_percent": planResidualPct,
+					"balance":               balanceYuan,
+					"cost_total":            costTotalYuan,
+				}
+			}
+		}
+
 		res, _ := json.Marshal(map[string]any{
 			"status":   "ready",
 			"accounts": accountsList,
 			"models":   modelsList,
+			"quota":    quotaData,
 			"mode":     "playground",
 			"version":  Version,
 		})
 		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
 	}
 
+	// 3.5. POST /api/accounts/disable or PATCH /accounts/{id}
+	if strings.Contains(path, "/disable") || (strings.Contains(path, "/accounts/") && method == "PATCH") {
+		var in struct {
+			ID string `json:"id"`
+			Disabled bool `json:"disabled"`
+		}
+		_ = json.Unmarshal(req.Body, &in)
+		accID := in.ID
+		if accID == "" && strings.Contains(path, "/accounts/") {
+			parts := strings.Split(path, "/")
+			for i, p := range parts {
+				if p == "accounts" && i+1 < len(parts) && parts[i+1] != "disable" {
+					accID = parts[i+1]
+					break
+				}
+			}
+		}
+		if accID != "" {
+			fpath := filepath.Join(oauthDir, "step2api-"+accID+".json")
+			if data, err := os.ReadFile(fpath); err == nil {
+				var item map[string]any
+				if err := json.Unmarshal(data, &item); err == nil {
+					item["disabled"] = in.Disabled
+					if updated, errM := json.MarshalIndent(item, "", "  "); errM == nil {
+						_ = os.WriteFile(fpath, updated, 0644)
+					}
+				}
+			}
+		}
+		msg := "已启用"
+		if in.Disabled {
+			msg = "已停用"
+		}
+		return pluginapi.ManagementResponse{
+			StatusCode: http.StatusOK,
+			Headers:    headers,
+			Body:       []byte(fmt.Sprintf(`{"ok":true,"message":%q}`, msg)),
+		}, nil
+	}
+
 	// 3. POST /api/accounts (Add Account)
-	if strings.Contains(path, "/api/accounts") && !strings.Contains(path, "/delete") && method == http.MethodPost {
+	if (path == "/v0/management/step2api/api/accounts" || path == "/step2api/api/accounts" || path == "/api/accounts" || strings.HasSuffix(path, "/api/accounts")) && method == http.MethodPost {
 		var in struct {
 			Name   string `json:"name"`
 			Cookie string `json:"cookie"`
@@ -279,7 +369,13 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		_ = json.Unmarshal(req.Body, &in)
 		accID := in.ID
 		if accID == "" && strings.Contains(path, "/accounts/") {
-			accID = path[strings.LastIndex(path, "/")+1:]
+			parts := strings.Split(path, "/")
+			for i, p := range parts {
+				if p == "accounts" && i+1 < len(parts) && parts[i+1] != "delete" {
+					accID = parts[i+1]
+					break
+				}
+			}
 		}
 		if accID != "" {
 			filePath := filepath.Join(oauthDir, "step2api-"+accID+".json")
@@ -322,7 +418,7 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		res, _ := json.Marshal(map[string]any{
 			"ok":        true,
 			"refreshed": refreshedCount,
-			"message":   fmt.Sprintf("å·²æåå·æ° %d ä¸ªè´¦å·ç Token", refreshedCount),
+			"message":   fmt.Sprintf("已成功刷新 %d 个账号的 Token", refreshedCount),
 		})
 		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
 	}
@@ -332,7 +428,7 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		return pluginapi.ManagementResponse{
 			StatusCode: http.StatusOK,
 			Headers:    headers,
-			Body:       []byte("{\"ok\":true,\"message\":\"StepFun AI Studio ç½å³é¾è·¯æ­£å¸¸\"}"),
+			Body:       []byte(`{"ok":true,"message":"连通正常，StepFun AI Studio 链路健康！","re_enabled":true}`),
 		}, nil
 	}
 

@@ -11,6 +11,7 @@ import (
 func TestPluginLifecycle(t *testing.T) {
 	p := NewPlugin(nil)
 
+	println("STEP 1")
 	// 1. Register
 	res, err := p.HandleMethod(pluginabi.MethodPluginRegister, nil)
 	if err != nil {
@@ -24,6 +25,7 @@ func TestPluginLifecycle(t *testing.T) {
 		t.Errorf("expected QuotaProvider capability to be true")
 	}
 
+	println("STEP 2")
 	// 2. Model Static
 	res, err = p.HandleMethod(pluginabi.MethodModelStatic, nil)
 	if err != nil {
@@ -34,6 +36,7 @@ func TestPluginLifecycle(t *testing.T) {
 		t.Errorf("unexpected static models response: %v", res)
 	}
 
+	println("STEP 3")
 	// 3. Model Route
 	routeReq := pluginapi.ModelRouteRequest{
 		RequestedModel: "step-3.5-flash",
@@ -48,12 +51,14 @@ func TestPluginLifecycle(t *testing.T) {
 		t.Errorf("unexpected route decision: %v", res)
 	}
 
+	println("STEP 4")
 	// 4. Auth Identifier
 	res, err = p.HandleMethod(pluginabi.MethodAuthIdentifier, nil)
 	if err != nil {
 		t.Fatalf("auth.identifier failed: %v", err)
 	}
 
+	println("STEP 5")
 	// 5. Auth Parse
 	parseReq := pluginapi.AuthParseRequest{
 		RawJSON: []byte(`{"oasis_token": "sample_access...sample_refresh", "account_id": "test-user"}`),
@@ -68,6 +73,7 @@ func TestPluginLifecycle(t *testing.T) {
 		t.Errorf("unexpected auth.parse result: %v", res)
 	}
 
+	println("STEP 6")
 	// 6. Quota Identifier & Describe
 	res, err = p.HandleMethod(pluginabi.MethodQuotaIdentifier, nil)
 	if err != nil {
@@ -87,6 +93,7 @@ func TestPluginLifecycle(t *testing.T) {
 		t.Errorf("unexpected quota describe response: %v", res)
 	}
 
+	println("STEP 7")
 	// 7. Quota Fetch fallback
 	fetchReq := pluginapi.QuotaFetchRequest{
 		AuthID:   "test-user",
