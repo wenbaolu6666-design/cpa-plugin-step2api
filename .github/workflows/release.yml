@@ -27,11 +27,11 @@ jobs:
         include:
           - goos: darwin
             goarch: arm64
-            os: macos-14
+            os: macos-latest
             ext: .dylib
           - goos: darwin
             goarch: amd64
-            os: macos-13
+            os: macos-latest
             ext: .dylib
           - goos: linux
             goarch: amd64
@@ -43,7 +43,7 @@ jobs:
             ext: .so
           - goos: windows
             goarch: amd64
-            os: windows-2025
+            os: ubuntu-24.04
             ext: .dll
 
     steps:
@@ -56,11 +56,11 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
-      - name: Install Linux Cross-Compiler (arm64)
-        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
+      - name: Install Toolchains on Linux
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 zip
 
       - name: Determine Version
         id: ver
@@ -72,7 +72,7 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Test Native Targets
-        if: (matrix.goos == 'darwin' && matrix.goarch == 'arm64') || (matrix.goos == 'linux' && matrix.goarch == 'amd64') || (matrix.goos == 'windows' && matrix.goarch == 'amd64')
+        if: (matrix.goos == 'darwin' && matrix.goarch == 'arm64') || (matrix.goos == 'linux' && matrix.goarch == 'amd64')
         run: go test -v ./...
 
       - name: Build Dynamic Library & Package Zip
@@ -84,8 +84,14 @@ jobs:
           export CGO_ENABLED=1
           export GOOS=${{ matrix.goos }}
           export GOARCH=${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "linux" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            export MACOSX_DEPLOYMENT_TARGET="13.0"
+            export CGO_CFLAGS="-O2 -mmacosx-version-min=13.0 -arch ${{ matrix.goarch == 'amd64' && 'x86_64' || 'arm64' }}"
+            export CGO_LDFLAGS="-mmacosx-version-min=13.0 -arch ${{ matrix.goarch == 'amd64' && 'x86_64' || 'arm64' }}"
+          elif [ "${{ matrix.goos }}" = "linux" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
             export CC="aarch64-linux-gnu-gcc"
+          elif [ "${{ matrix.goos }}" = "windows" ]; then
+            export CC="x86_64-w64-mingw32-gcc"
           fi
           go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o "out/${LIB_NAME}" ./cmd/step2api-plugin
           (cd out && zip -j "../${ZIP_NAME}" "${LIB_NAME}")
