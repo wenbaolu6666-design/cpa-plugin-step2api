@@ -20,6 +20,9 @@ func TestPluginLifecycle(t *testing.T) {
 	if !ok || reg.SchemaVersion != pluginabi.SchemaVersion || reg.Metadata.GitHubRepository == "" {
 		t.Errorf("unexpected register response: %v", res)
 	}
+	if !reg.Capabilities.QuotaProvider {
+		t.Errorf("expected QuotaProvider capability to be true")
+	}
 
 	// 2. Model Static
 	res, err = p.HandleMethod(pluginabi.MethodModelStatic, nil)
@@ -63,5 +66,42 @@ func TestPluginLifecycle(t *testing.T) {
 	pResp, ok := res.(pluginapi.AuthParseResponse)
 	if !ok || !pResp.Handled || pResp.Auth.ID != "test-user" {
 		t.Errorf("unexpected auth.parse result: %v", res)
+	}
+
+	// 6. Quota Identifier & Describe
+	res, err = p.HandleMethod(pluginabi.MethodQuotaIdentifier, nil)
+	if err != nil {
+		t.Fatalf("quota.identifier failed: %v", err)
+	}
+	qId, ok := res.(rpcIdentifierResponse)
+	if !ok || qId.Identifier != ProviderID {
+		t.Errorf("unexpected quota identifier response: %v", res)
+	}
+
+	res, err = p.HandleMethod(pluginabi.MethodQuotaDescribe, nil)
+	if err != nil {
+		t.Fatalf("quota.describe failed: %v", err)
+	}
+	qDesc, ok := res.(pluginapi.QuotaDescribeResponse)
+	if !ok || len(qDesc.SupportedProviders) == 0 {
+		t.Errorf("unexpected quota describe response: %v", res)
+	}
+
+	// 7. Quota Fetch fallback
+	fetchReq := pluginapi.QuotaFetchRequest{
+		AuthID:   "test-user",
+		Provider: ProviderID,
+		Metadata: map[string]any{
+			"oasis_token": "sample_access...sample_refresh",
+		},
+	}
+	rawFetch, _ := json.Marshal(fetchReq)
+	res, err = p.HandleMethod(pluginabi.MethodQuotaFetch, rawFetch)
+	if err != nil {
+		t.Fatalf("quota.fetch failed: %v", err)
+	}
+	qFetch, ok := res.(pluginapi.QuotaFetchResponse)
+	if !ok || len(qFetch.Groups) == 0 {
+		t.Errorf("unexpected quota fetch response: %v", res)
 	}
 }

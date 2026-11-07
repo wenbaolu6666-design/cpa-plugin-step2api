@@ -17,9 +17,80 @@ import (
 )
 
 const (
-	CreateConversationPath = "/api/step.openapi.devcenter.Dashboard/CreateConversation"
-	PlaygroundStreamPath   = "/api/stdhttp/v1/studio/stream"
+	CreateConversationPath     = "/api/step.openapi.devcenter.Dashboard/CreateConversation"
+	PlaygroundStreamPath       = "/api/stdhttp/v1/studio/stream"
+	QueryStudioRateLimitPath   = "/api/step.openapi.devcenter.Dashboard/QueryStudioRateLimit"
+	GetStepPlanStatusPath      = "/api/step.openapi.devcenter.Dashboard/GetStepPlanStatus"
+	QueryAccountBalancePath    = "/api/step.openapi.devcenter.Dashboard/QueryAccountBalance"
+	QueryStepPlanRateLimitPath = "/api/step.openapi.devcenter.Dashboard/QueryStepPlanRateLimit"
 )
+
+type PlatformAccountBalanceResponse struct {
+	Balance           string `json:"balance"`
+	Payment           string `json:"payment"`
+	CostTotal         string `json:"cost_total"`
+	Voucher           string `json:"voucher"`
+	Credit            string `json:"credit"`
+	VoucherExpireTime int64  `json:"voucher_expire_time"`
+}
+
+type StepPlanCreditBucket struct {
+	Type           int    `json:"type"`
+	CreditTotal    string `json:"credit_total"`
+	CreditResidual string `json:"credit_residual"`
+	ExpireAt       string `json:"expire_at"`
+	NextResetAt    string `json:"next_reset_at"`
+}
+
+type StepPlanCreditRateLimit struct {
+	SubscriptionCreditLeftRate  float64                `json:"subscription_credit_left_rate"`
+	SubscriptionCreditResetTime string                 `json:"subscription_credit_reset_time"`
+	TopupCreditLeftRate         float64                `json:"topup_credit_left_rate"`
+	CreditBuckets               []StepPlanCreditBucket `json:"credit_buckets"`
+}
+
+type StepPlanRateLimitResponse struct {
+	Status                 int                      `json:"status"`
+	Desc                   string                   `json:"desc"`
+	PlanFamily             int                      `json:"plan_family"`
+	FiveHourUsageLeftRate  float64                  `json:"five_hour_usage_left_rate"`
+	FiveHourUsageResetTime string                   `json:"five_hour_usage_reset_time"`
+	WeeklyUsageLeftRate    float64                  `json:"weekly_usage_left_rate"`
+	WeeklyUsageResetTime   string                   `json:"weekly_usage_reset_time"`
+	PlanCreditRateLimit    *StepPlanCreditRateLimit `json:"plan_credit_rate_limit"`
+}
+
+type StudioCreditRateLimit struct {
+	SubscriptionCreditLeftRate  float64 `json:"subscription_credit_left_rate"`
+	SubscriptionCreditResetTime string  `json:"subscription_Credit_reset_time"`
+}
+
+type StudioRateLimitResponse struct {
+	FreeRate               float64                `json:"free_rate"`
+	FiveHourUsageLeftRate  float64                `json:"five_hour_usage_left_rate"`
+	FiveHourUsageResetTime string                 `json:"five_hour_usage_reset_time"`
+	WeeklyUsageLeftRate    float64                `json:"weekly_usage_left_rate"`
+	WeeklyUsageResetTime   string                 `json:"weekly_usage_reset_time"`
+	CreditRateLimit        *StudioCreditRateLimit `json:"credit_rate_limit"`
+}
+
+type StepPlanSubscription struct {
+	PlanType    int    `json:"plan_type"`
+	Name        string `json:"name"`
+	Status      int    `json:"status"`
+	PayChannel  int    `json:"pay_channel"`
+	ActivatedAt string `json:"activated_at"`
+	ExpiredAt   string `json:"expired_at"`
+	AutoRenew   bool   `json:"auto_renew"`
+	PlanID      string `json:"plan_id"`
+	PlanFamily  int    `json:"plan_family"`
+}
+
+type StepPlanStatusResponse struct {
+	Status       int                   `json:"status"`
+	Desc         string                `json:"desc"`
+	Subscription *StepPlanSubscription `json:"subscription"`
+}
 
 type ChatModelConfig struct {
 	MaxTokens   int     `json:"max_tokens,omitempty"`
@@ -118,6 +189,146 @@ func (c *Client) applyHeaders(req *http.Request) {
 	if webID != "" {
 		req.Header.Set("oasis-webid", webID)
 	}
+}
+
+func (c *Client) QueryRateLimit(ctx context.Context) (*StudioRateLimitResponse, error) {
+	_ = c.EnsureFreshToken(ctx)
+
+	targetURL := c.baseURL + QueryStudioRateLimitPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader("{}"))
+	if err != nil {
+		return nil, fmt.Errorf("create rate limit request: %w", err)
+	}
+	c.applyHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("rate limit http error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		if newTok, errRef := RefreshToken(ctx, c.httpClient, c.baseURL, c.GetToken(), c.webID); errRef == nil && newTok != "" {
+			c.SetToken(newTok)
+			reqRetry, _ := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader("{}"))
+			c.applyHeaders(reqRetry)
+			if respRetry, errRetry := c.httpClient.Do(reqRetry); errRetry == nil {
+				defer respRetry.Body.Close()
+				if respRetry.StatusCode < 400 {
+					bodyBytes, _ = io.ReadAll(respRetry.Body)
+					resp.StatusCode = respRetry.StatusCode
+				}
+			}
+		}
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("rate limit returned http %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var res StudioRateLimitResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("unmarshal rate limit response: %w", err)
+	}
+	return &res, nil
+}
+
+func (c *Client) GetStepPlanStatus(ctx context.Context) (*StepPlanStatusResponse, error) {
+	_ = c.EnsureFreshToken(ctx)
+
+	targetURL := c.baseURL + GetStepPlanStatusPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader("{}"))
+	if err != nil {
+		return nil, fmt.Errorf("create step plan request: %w", err)
+	}
+	c.applyHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("step plan http error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		if newTok, errRef := RefreshToken(ctx, c.httpClient, c.baseURL, c.GetToken(), c.webID); errRef == nil && newTok != "" {
+			c.SetToken(newTok)
+			reqRetry, _ := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader("{}"))
+			c.applyHeaders(reqRetry)
+			if respRetry, errRetry := c.httpClient.Do(reqRetry); errRetry == nil {
+				defer respRetry.Body.Close()
+				if respRetry.StatusCode < 400 {
+					bodyBytes, _ = io.ReadAll(respRetry.Body)
+					resp.StatusCode = respRetry.StatusCode
+				}
+			}
+		}
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("step plan returned http %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var res StepPlanStatusResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("unmarshal step plan response: %w", err)
+	}
+	return &res, nil
+}
+
+func (c *Client) QueryAccountBalance(ctx context.Context) (*PlatformAccountBalanceResponse, error) {
+	_ = c.EnsureFreshToken(ctx)
+
+	targetURL := c.baseURL + QueryAccountBalancePath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader("{}"))
+	if err != nil {
+		return nil, fmt.Errorf("create account balance request: %w", err)
+	}
+	c.applyHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("account balance http error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("account balance returned http %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var res PlatformAccountBalanceResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("unmarshal account balance response: %w", err)
+	}
+	return &res, nil
+}
+
+func (c *Client) QueryStepPlanRateLimit(ctx context.Context) (*StepPlanRateLimitResponse, error) {
+	_ = c.EnsureFreshToken(ctx)
+
+	targetURL := c.baseURL + QueryStepPlanRateLimitPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader("{}"))
+	if err != nil {
+		return nil, fmt.Errorf("create step plan rate limit request: %w", err)
+	}
+	c.applyHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("step plan rate limit http error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("step plan rate limit returned http %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var res StepPlanRateLimitResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("unmarshal step plan rate limit response: %w", err)
+	}
+	return &res, nil
 }
 
 func (c *Client) CreateConversation(ctx context.Context) (string, error) {

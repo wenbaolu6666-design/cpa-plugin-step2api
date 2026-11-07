@@ -118,11 +118,11 @@ func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
 	}
 	p.loginStateMu.Unlock()
 
-	loginURL := "http://127.0.0.1:8317/v0/resource/plugins/step2api/accounts"
+	loginURL := fmt.Sprintf("http://127.0.0.1:8317/v0/resource/plugins/step2api/accounts?state=%s", stateID)
 	return pluginapi.AuthLoginStartResponse{
 		Provider:  ProviderID,
-		URL:      loginURL,
-		State:    stateID,
+		URL:       loginURL,
+		State:     stateID,
 		ExpiresAt: time.Now().Add(15 * time.Minute),
 	}, nil
 }
@@ -142,7 +142,7 @@ func (p *Plugin) handleAuthLoginPoll(raw []byte) (any, error) {
 			Status:  pluginapi.AuthLoginStatusError,
 			Message: "login session expired or not found",
 		}, nil
-}
+	}
 
 	if session.Done && session.Account != nil {
 		return pluginapi.AuthLoginPollResponse{

@@ -29,9 +29,9 @@ type rpcRegistration struct {
 type rpcCapabilities struct {
 	ModelProvider          bool                         `json:"model_provider"`
 	AuthProvider           bool                         `json:"auth_provider"`
-	Scheduler             bool                         `json:"scheduler"`
-	ModelRouter           bool                         `json:"model_router"`
-	Executor              bool                         `json:"executor"`
+	Scheduler              bool                         `json:"scheduler"`
+	ModelRouter            bool                         `json:"model_router"`
+	Executor               bool                         `json:"executor"`
 	ExecutorModelScope     pluginapi.ExecutorModelScope `json:"executor_model_scope,omitempty"`
 	ExecutorInputFormats   []string                     `json:"executor_input_formats,omitempty"`
 	ExecutorOutputFormats  []string                     `json:"executor_output_formats,omitempty"`
@@ -114,9 +114,11 @@ func (p *Plugin) HandleMethod(method string, raw []byte) (any, error) {
 		return p.handleExecutorCountTokens(raw)
 
 	case pluginabi.MethodQuotaIdentifier:
-		return p.handleExecutorIdentifier()
-	case pluginabi.MethodQuotaDescribe, pluginabi.MethodQuotaFetch:
-		return p.handleQuotaStatus(raw)
+		return p.handleQuotaIdentifier()
+	case pluginabi.MethodQuotaDescribe:
+		return p.handleQuotaDescribe()
+	case pluginabi.MethodQuotaFetch:
+		return p.handleQuotaFetch(raw)
 
 	case pluginabi.MethodCommandLineRegister:
 		return p.handleCLIRegister()
@@ -174,9 +176,9 @@ func (p *Plugin) handleRegister(raw []byte) (any, error) {
 		},
 		Capabilities: rpcCapabilities{
 			ModelProvider:          true,
-			ModelRouter:           true,
+			ModelRouter:            true,
 			AuthProvider:           true,
-			Executor:              true,
+			Executor:               true,
 			ExecutorModelScope:     pluginapi.ExecutorModelScopeOAuth,
 			ExecutorInputFormats:   []string{"chat-completions", "responses", "anthropic"},
 			ExecutorOutputFormats:  []string{"chat-completions", "responses", "anthropic"},
