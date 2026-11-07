@@ -356,8 +356,7 @@ function render() {
     </tr>`;
   }).join("") : '<tr><td colspan="8" class="empty">暂无请求。</td></tr>';
 
-  if (state.password_default) $("tagline").textContent = "已登录 · ⚠ 面板密码仍是默认值 admin";
-  else $("tagline").textContent = "已登录 · 默认模式 " + (state.mode || "playground");
+  if ($("tagline")) $("tagline").textContent = "运行中 · 已就绪 " + accounts.length + " 个账号";
   if (!modeDirty && state.settings && state.settings.default_mode) {
     $("set-mode").value = state.settings.default_mode;
   }
@@ -368,37 +367,15 @@ function render() {
 }
 
 async function refresh() {
-  state = await api("/v0/management/step2api/api/state");
-  // Deliberately NOT persisted: the state carries every API key, and localStorage
-  // survives logout on a shared machine (and is readable by any same-origin script).
-  localStorage.removeItem("step2api_state");
-  $("login").classList.add("hidden");
-  $("app").classList.remove("hidden");
-  render();
-}
-
-async function login() {
-  const password = $("password").value;
-  const data = await api("/v0/management/step2api/api/login", {method: "POST", body: JSON.stringify({password})});
-  panelToken = data.token;
-  sessionStorage.setItem("step2api_panel", panelToken);
-  await refresh();
-}
-
-async function logout() {
-  const stale = panelToken;
-  panelToken = "";
-  sessionStorage.removeItem("step2api_panel");
-  localStorage.removeItem("step2api_state");
-  $("app").classList.add("hidden");
-  $("app").classList.remove("hidden"); panelToken = "cpa"; refresh();
-  $("tagline").textContent = "未登录";
-  if (stale) {
-    // Revoke it server-side as well: a token left valid after "退出" is still a session.
-    try { await fetch("/v0/management/step2api/api/logout", {method: "POST", headers: {"X-Panel-Token": stale}}); }
-    catch (e) { /* offline: the token ages out on its own */ }
+  try {
+    state = await api("/v0/management/step2api/api/state");
+    render();
+  } catch (e) {
+    toast("加载状态失败: " + e.message, true);
   }
 }
+
+
 
 document.addEventListener("click", async (ev) => {
   const btn = ev.target.closest("button[data-act], button[data-key-act]");
@@ -431,9 +408,7 @@ document.addEventListener("click", async (ev) => {
   } catch (e) { toast(e.message, true); }
 });
 
-$("btn-login").onclick = () => login().catch(e => toast(e.message, true));
-$("password").addEventListener("keydown", e => { if (e.key === "Enter") login().catch(err => toast(err.message, true)); });
-$("btn-logout").onclick = logout;
+
 $("btn-csv").onclick = () => {
   const cols = ["ts", "account", "model", "mode", "tokens_in", "tokens_out", "cached_tokens", "ttft", "duration", "status", "finish_reason", "error", "client", "tenant", "request_id", "replayed"];
   const lines = [cols.join(",")].concat((state.usage || []).map(r =>
