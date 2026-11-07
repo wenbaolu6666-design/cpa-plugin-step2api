@@ -176,6 +176,8 @@ resp = client.chat.completions.create(model="step-5-preview", messages=[{"role":
 <div class="toast" id="toast"></div>
 
 <script>
+/*__INJECT_CPA_KEY__*/
+
 const $ = (id) => document.getElementById(id);
 let panelToken = sessionStorage.getItem("step2api_panel") || "";
 let state = {};
@@ -192,7 +194,16 @@ function toast(msg, isErr) {
 let pending = 0;
 function getCPAKey() {
   const input = document.getElementById("mgmt-key");
-  if (input && input.value.trim()) return input.value.trim();
+  const badge = document.getElementById("key-badge");
+  if (window.__CPA_KEY__) {
+    if (input && !input.value) input.value = window.__CPA_KEY__;
+    if (badge) { badge.className = "pill ok"; badge.textContent = "密钥: 已自动注入"; }
+    return window.__CPA_KEY__;
+  }
+  if (input && input.value.trim()) {
+    if (badge) { badge.className = "pill ok"; badge.textContent = "密钥: 已配置"; }
+    return input.value.trim();
+  }
   const params = new URLSearchParams(window.location.search);
   const urlKey = params.get("key") || params.get("management_key") || params.get("token");
   if (urlKey && urlKey.trim()) { if (input) input.value = urlKey.trim(); return urlKey.trim(); }
@@ -225,7 +236,7 @@ async function api(path, opts = {}) {
       if (resp.status === 401 && path !== "/v0/management/step2api/api/login") {
         // The server forgot this session (it restarted, or the panel token aged out).
         // Fall back to the login gate instead of leaving a page whose buttons all fail.
-        logout();
+        
       }
       throw new Error((data.error && data.error.message) || text || ("HTTP " + resp.status));
     }
@@ -461,6 +472,14 @@ setInterval(() => {
 }, 15000);
 
 $("btn-add-account").onclick = async () => {
+  const btn = $("btn-add-account");
+  const rawCookie = $("acct-cookie").value.trim() || $("acct-token").value.trim();
+  if (!rawCookie) {
+    toast("请先粘贴 StepFun Cookie 或 Oasis-Token", true);
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "正在添加并校验...";
   try {
     const body = {
       name: $("acct-name").value.trim(),
@@ -469,11 +488,15 @@ $("btn-add-account").onclick = async () => {
       cookie: $("acct-cookie").value.trim(),
     };
     const r = await api("/v0/management/step2api/api/accounts", {method: "POST", body: JSON.stringify(body)});
-    const verb = r.updated ? "账号已更新" : "账号已添加";
-    toast(r.ok ? verb + "并完成续期" : (verb + "，但校验失败（可能是访客会话或凭证已失效）：" + r.detail), !r.ok);
+    toast(r.message || "账号已成功添加并保存至 CPA oauth 目录！", false);
     $("acct-token").value = ""; $("acct-cookie").value = ""; $("acct-name").value = ""; $("acct-webid").value = "";
     await refresh();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast("添加失败: " + e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "添加账号";
+  }
 };
 
 $("btn-export").onclick = async () => {

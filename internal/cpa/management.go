@@ -13,6 +13,35 @@ import (
 	"github.com/WenPaul/cpa-plugin-step2api/internal/stepstudio"
 )
 
+func getLocalManagementKey() string {
+	candidates := []string{
+		`../config.toml`,
+		`../../config.toml`,
+		`config.toml`,
+		`D:\WenPaul\Documents\路由网关\EasyCLIProxyAPI\config.toml`,
+	}
+	for _, p := range candidates {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "management-secret-key") {
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) == 2 {
+					val := strings.TrimSpace(parts[1])
+					val = strings.Trim(val, "\"\x27\r ")
+					if val != "" {
+						return val
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func resolveOAuthDir() string {
 	candidates := []string{
 		`../oauth`,
@@ -92,13 +121,18 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 
 	// 1. Serve HTML UI
 	if path == "/accounts" || path == "/" || strings.HasPrefix(path, "/v0/resource/plugins/step2api") {
+		renderedHTML := webUIDashboardHTML
+		key := getLocalManagementKey()
+		if key != "" {
+			renderedHTML = strings.Replace(renderedHTML, "/*__INJECT_CPA_KEY__*/", fmt.Sprintf("window.__CPA_KEY__ = %q;", key), 1)
+		}
 		return pluginapi.ManagementResponse{
 			StatusCode: http.StatusOK,
 			Headers: http.Header{
 				"Content-Type":  []string{"text/html; charset=utf-8"},
 				"Cache-Control": []string{"no-store"},
 			},
-			Body: []byte(webUIDashboardHTML),
+			Body: []byte(renderedHTML),
 		}, nil
 	}
 

@@ -206,20 +206,30 @@ func ExtractCookieTokens(raw string) (string, string) {
 	parts := strings.Split(strings.ReplaceAll(raw, "\n", ";"), ";")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		if part == "" || !strings.Contains(part, "=") {
+		if part == "" {
 			continue
 		}
-		kv := strings.SplitN(part, "=", 2)
-		name := strings.ToLower(strings.TrimSpace(kv[0]))
-		val := strings.TrimSpace(kv[1])
-		if name == "oasis-token" {
-			token = val
-		} else if name == "oasis-webid" {
-			webid = val
+		if strings.Contains(part, "=") {
+			kv := strings.SplitN(part, "=", 2)
+			name := strings.ToLower(strings.TrimSpace(kv[0]))
+			val := strings.TrimSpace(kv[1])
+			if name == "oasis-token" || name == "oasistoken" || name == "token" {
+				token = val
+			} else if name == "oasis-webid" || name == "oasiswebid" || name == "webid" {
+				webid = val
+			}
+		} else if strings.Contains(part, "...") && token == "" {
+			token = part
+		} else if strings.HasPrefix(part, "eyJ") && token == "" {
+			token = part
 		}
 	}
 	if token == "" {
-		token = raw
+		token = strings.SplitN(raw, ";", 2)[0]
+	}
+	token = strings.Trim(strings.TrimSpace(token), "\"\x27")
+	if idx := strings.IndexByte(token, ';'); idx >= 0 {
+		token = strings.TrimSpace(token[:idx])
 	}
 	if webid == "" {
 		webid = ExtractDeviceID(token)
