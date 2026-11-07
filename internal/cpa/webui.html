@@ -238,7 +238,7 @@ async function api(path, opts = {}) {
         // Fall back to the login gate instead of leaving a page whose buttons all fail.
         
       }
-      throw new Error((data.error && data.error.message) || text || ("HTTP " + resp.status));
+      const errDetail = (typeof data.error === "string" ? data.error : (data.error && data.error.message)) || data.message || data.detail || text || ("HTTP " + resp.status); throw new Error(errDetail);
     }
     return data;
   } finally {

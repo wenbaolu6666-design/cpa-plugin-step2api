@@ -224,7 +224,7 @@ func ExtractCookieTokens(raw string) (string, string) {
 			token = part
 		}
 	}
-	if token == "" {
+	if token == "" && (strings.HasPrefix(raw, "eyJ") || strings.Contains(raw, "...")) {
 		token = strings.SplitN(raw, ";", 2)[0]
 	}
 	token = strings.Trim(strings.TrimSpace(token), "\"\x27")

@@ -7,10 +7,10 @@ import (
 )
 
 const (
-	PluginID    = "step2api"
-	PluginName  = "Step2API"
-	ProviderID  = "step2api"
-	Version     = "1.0.0"
+	PluginID   = "step2api"
+	PluginName = "Step2API"
+	ProviderID = "step2api"
+	Version    = "1.0.8"
 )
 
 type PluginConfig struct {
