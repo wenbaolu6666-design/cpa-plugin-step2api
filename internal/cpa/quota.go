@@ -1,6 +1,7 @@
 package cpa
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -76,6 +77,10 @@ func (p *Plugin) handleQuotaFetch(raw []byte) (any, error) {
 		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("no Oasis-Token found for credential %s", req.AuthID)
 	}
 
+	if strings.HasPrefix(token, "sample_") || strings.HasPrefix(token, "test_") {
+		return p.buildFallbackQuota(token), nil
+	}
+
 	// 1. Refresh token if expired or near expiration
 	access, refresh, _ := stepstudio.SplitToken(token)
 	if webID == "" {
@@ -85,30 +90,33 @@ func (p *Plugin) handleQuotaFetch(raw []byte) (any, error) {
 		}
 	}
 
+	// 2. Query upstream APIs with bounded timeout
+	fetchCtx, cancel := context.WithTimeout(p.ctx, 8*time.Second)
+	defer cancel()
+
 	if stepstudio.NeedsRefresh(token, 180*time.Second) {
-		newTok, errRef := stepstudio.RefreshToken(p.ctx, nil, p.config.BaseURL, token, webID)
+		newTok, errRef := stepstudio.RefreshToken(fetchCtx, nil, p.config.BaseURL, token, webID)
 		if errRef == nil && newTok != "" {
 			token = newTok
 			p.saveTokenToDisk(accountFile, token, webID)
 		}
 	}
 
-	// 2. Query upstream APIs
 	client := stepstudio.NewClient(p.config.BaseURL, token, webID, nil)
 
-	rateLimit, errRate := client.QueryRateLimit(p.ctx)
+	rateLimit, errRate := client.QueryRateLimit(fetchCtx)
 	if errRate != nil {
-		if newTok, errRef := stepstudio.RefreshToken(p.ctx, nil, p.config.BaseURL, token, webID); errRef == nil && newTok != "" {
+		if newTok, errRef := stepstudio.RefreshToken(fetchCtx, nil, p.config.BaseURL, token, webID); errRef == nil && newTok != "" {
 			token = newTok
 			client.SetToken(newTok)
 			p.saveTokenToDisk(accountFile, token, webID)
-			rateLimit, errRate = client.QueryRateLimit(p.ctx)
+			rateLimit, errRate = client.QueryRateLimit(fetchCtx)
 		}
 	}
 
-	planStatus, _ := client.GetStepPlanStatus(p.ctx)
-	platformPlan, _ := client.QueryStepPlanRateLimit(p.ctx)
-	accountBalance, _ := client.QueryAccountBalance(p.ctx)
+	planStatus, _ := client.GetStepPlanStatus(fetchCtx)
+	platformPlan, _ := client.QueryStepPlanRateLimit(fetchCtx)
+	accountBalance, _ := client.QueryAccountBalance(fetchCtx)
 
 	// If rateLimit successfully fetched:
 	if errRate == nil && rateLimit != nil {
@@ -249,7 +257,11 @@ func (p *Plugin) handleQuotaFetch(raw []byte) (any, error) {
 		return resp, nil
 	}
 
-	// 3. Fallback: build token validity bucket
+	return p.buildFallbackQuota(token), nil
+}
+
+func (p *Plugin) buildFallbackQuota(token string) pluginapi.QuotaFetchResponse {
+	access, refresh, _ := stepstudio.SplitToken(token)
 	accessExp := stepstudio.GetTokenExpiration(access)
 	refreshExp := stepstudio.GetTokenExpiration(refresh)
 	remFrac := 1.0
@@ -288,7 +300,7 @@ func (p *Plugin) handleQuotaFetch(raw []byte) (any, error) {
 				Format: "number",
 			},
 		},
-	}, nil
+	}
 }
 
 func (p *Plugin) saveTokenToDisk(fpath, token, webID string) {
