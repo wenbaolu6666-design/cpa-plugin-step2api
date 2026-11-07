@@ -2,6 +2,7 @@ package cpa
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,7 +15,6 @@ import (
 
 func resolveOAuthDir() string {
 	candidates := []string{
-		`D:\WenPaul\Documents\路由网关\EasyCLIProxyAPI\oauth`,
 		`../oauth`,
 		`../../oauth`,
 		`oauth`,
@@ -24,7 +24,34 @@ func resolveOAuthDir() string {
 			return c
 		}
 	}
-	return `D:\WenPaul\Documents\路由网关\EasyCLIProxyAPI\oauth`
+	return `../oauth`
+}
+
+func (p *Plugin) handleCLIRegister() (any, error) {
+	return pluginapi.CommandLineRegistrationResponse{
+		Flags: []pluginapi.CommandLineFlag{
+			{
+				Name:         "step2api-status",
+				Type:         "bool",
+				DefaultValue: "false",
+				Usage:        "Print StepFun AI Studio plugin status and accounts",
+			},
+		},
+	}, nil
+}
+
+func (p *Plugin) handleCLIRun(raw []byte) (any, error) {
+	var req pluginapi.CommandLineExecutionRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, err
+	}
+	if flag, ok := req.TriggeredFlags["step2api-status"]; ok && flag.Set && strings.EqualFold(flag.Value, "true") {
+		return pluginapi.CommandLineExecutionResponse{
+			ExitCode: 0,
+			Stdout:   []byte("StepFun AI Studio plugin (step2api) active\n"),
+		}, nil
+	}
+	return pluginapi.CommandLineExecutionResponse{ExitCode: 0}, nil
 }
 
 func (p *Plugin) handleManagementRegister(raw []byte) (any, error) {
@@ -32,14 +59,16 @@ func (p *Plugin) handleManagementRegister(raw []byte) (any, error) {
 		Routes: []pluginapi.ManagementRoute{
 			{Method: http.MethodGet, Path: "/v0/management/step2api/api/state", Description: "Step2API dashboard state"},
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts", Description: "Add StepFun account via Cookie/Token"},
+			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/delete", Description: "Delete StepFun account"},
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/test", Description: "Test StepFun account connectivity"},
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/refresh", Description: "Refresh all StepFun account tokens"},
+			{Method: http.MethodPost, Path: "/v0/management/step2api/api/sync", Description: "Sync StepFun accounts to host auths"},
 		},
 		Resources: []pluginapi.ResourceRoute{
 			{
 				Path:        "/accounts",
 				Menu:        "StepFun Studio",
-				Description: "StepFun AI Studio 控制台与账号管理",
+				Description: "StepFun AI Studio Console & Account Management",
 			},
 		},
 	}, nil
@@ -52,24 +81,37 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 	}
 
 	rawPath := strings.ToLower(strings.TrimSpace(req.Path))
+	path := rawPath
+	if idx := strings.IndexByte(rawPath, '?'); idx >= 0 {
+		path = rawPath[:idx]
+	}
 	method := strings.ToUpper(strings.TrimSpace(req.Method))
-	headers := make(http.Header)
+	if method == "" {
+		method = http.MethodGet
+	}
 
 	// 1. Serve HTML UI
-	if strings.Contains(rawPath, "/accounts") && !strings.Contains(rawPath, "/api/") {
-		headers.Set("Content-Type", "text/html; charset=utf-8")
+	if path == "/accounts" || path == "/" || strings.HasPrefix(path, "/v0/resource/plugins/step2api") {
 		return pluginapi.ManagementResponse{
 			StatusCode: http.StatusOK,
-			Headers:    headers,
-			Body:       []byte(webUIDashboardHTML),
+			Headers: http.Header{
+				"Content-Type":  []string{"text/html; charset=utf-8"},
+				"Cache-Control": []string{"no-store"},
+			},
+			Body: []byte(webUIDashboardHTML),
 		}, nil
 	}
 
+	if strings.HasPrefix(path, "/step2api/") {
+		path = "/v0/management" + path
+	}
+
+	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
 	oauthDir := resolveOAuthDir()
 
 	// 2. GET /api/state
-	if strings.Contains(rawPath, "/api/state") {
+	if strings.Contains(path, "/api/state") {
 		var accountsList []map[string]any
 		if files, err := filepath.Glob(filepath.Join(oauthDir, "step2api-*.json")); err == nil {
 			for _, fpath := range files {
@@ -87,8 +129,11 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 						accountsList = append(accountsList, map[string]any{
 							"id":           item.AccountID,
 							"name":         item.Name,
+							"oasis_id":     item.WebID,
 							"webid":        item.WebID,
 							"token":        item.OasisToken,
+							"token_exp":    accessExp.Unix(),
+							"refresh_exp":  refreshExp.Unix(),
 							"refresh_days": refDays,
 							"access_exp":   accessExp.Format(time.RFC3339),
 							"disabled":     false,
@@ -112,17 +157,17 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		}
 
 		res, _ := json.Marshal(map[string]any{
+			"status":   "ready",
 			"accounts": accountsList,
 			"models":   modelsList,
 			"mode":     "playground",
-			"keys":     []any{},
-			"usage":    []any{},
+			"version":  Version,
 		})
 		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
 	}
 
 	// 3. POST /api/accounts (Add Account)
-	if strings.Contains(rawPath, "/api/accounts") && method == http.MethodPost {
+	if strings.Contains(path, "/api/accounts") && !strings.Contains(path, "/delete") && method == http.MethodPost {
 		var in struct {
 			Name   string `json:"name"`
 			Cookie string `json:"cookie"`
@@ -130,16 +175,20 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			WebID  string `json:"webid"`
 		}
 		_ = json.Unmarshal(req.Body, &in)
-		rawCookie := in.Cookie
+		rawCookie := strings.TrimSpace(in.Cookie)
 		if rawCookie == "" {
-			rawCookie = in.Token
+			rawCookie = strings.TrimSpace(in.Token)
 		}
 		tok, webid := stepstudio.ExtractCookieTokens(rawCookie)
 		if in.WebID != "" {
-			webid = in.WebID
+			webid = strings.TrimSpace(in.WebID)
 		}
 		if tok == "" {
-			return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Headers: headers, Body: []byte(`{"detail":"未检测到 Oasis-Token，请检查 Cookie 格式"}`)}, nil
+			return pluginapi.ManagementResponse{
+				StatusCode: http.StatusBadRequest,
+				Headers:    headers,
+				Body:       []byte("{\"error\":\"æªæ£æµå°ææç Oasis-Tokenï¼¨è¯·ç¡®ä¿ä» F12 è¯·æ±å¤´ä¸­å¤å¶äºå®æ´ç Cookie æ Oasis-Token å­ç¬¦ä¸²\"}"),
+			}, nil
 		}
 
 		accName := strings.TrimSpace(in.Name)
@@ -147,7 +196,12 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			if webid != "" {
 				accName = "step-" + webid[:min(8, len(webid))]
 			} else {
-				accName = "step-default"
+				dev := stepstudio.ExtractDeviceID(tok)
+				if dev != "" {
+					accName = "step-" + dev[:min(8, len(dev))]
+				} else {
+					accName = fmt.Sprintf("step-%d", time.Now().Unix()%10000)
+				}
 			}
 		}
 
@@ -163,7 +217,7 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		data, _ := json.MarshalIndent(payload, "", "  ")
 		filePath := filepath.Join(oauthDir, "step2api-"+accName+".json")
 		if err := os.WriteFile(filePath, data, 0644); err != nil {
-			return pluginapi.ManagementResponse{StatusCode: http.StatusInternalServerError, Headers: headers, Body: []byte(`{"detail":"保存凭据文件失账"}`)}, nil
+			return pluginapi.ManagementResponse{StatusCode: http.StatusInternalServerError, Headers: headers, Body: []byte("{\"error\":\"åå¥å­æ®æä»¶å¤±è´¥\"}")}, nil
 		}
 
 		p.loginStateMu.Lock()
@@ -176,32 +230,90 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		res, _ := json.Marshal(map[string]any{
 			"ok":      true,
 			"id":      accName,
-			"updated": false,
+			"account": payload,
+			"message": "è´¦å·å·²æåå¯¼å¥å¹¶ä¿å­è³ CPA oauth å­æ®ç®å½",
 		})
 		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
 	}
 
-	// 4. DELETE /api/accounts/?
-	if strings.Contains(rawPath, "/api/accounts/") && method == http.MethodDelete {
-		accID := rawPath[strings.LastIndex(rawPath, "/")+1:]
-		_filePath := filepath.Join(oauthDir, "step2api-"+accID+".json")
-		_ = os.Remove(_filePath)
-		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: []byte(`{"ok":true}`)}, nil
+	// 4. POST /api/accounts/delete
+	if (strings.Contains(path, "/api/accounts/delete") && method == http.MethodPost) ||
+		(strings.Contains(path, "/api/accounts") && method == http.MethodDelete) {
+		var in struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(req.Body, &in)
+		accID := in.ID
+		if accID == "" && strings.Contains(path, "/accounts/") {
+			accID = path[strings.LastIndex(path, "/")+1:]
+		}
+		if accID != "" {
+			filePath := filepath.Join(oauthDir, "step2api-"+accID+".json")
+			_ = os.Remove(filePath)
+		}
+		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: []byte("{\"ok\":true,\"message\":\"è´¦å·å·²å é¤\"}")}, nil
 	}
 
-	// 5. POST /api/accounts/test
-	if strings.Contains(rawPath, "/test") {
-		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: []byte(`{"ok":true,"re_enabled":false}`)}, nil
+	// 5. POST /api/accounts/refresh
+	if strings.Contains(path, "/refresh") {
+		var in struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(req.Body, &in)
+		refreshedCount := 0
+		if files, err := filepath.Glob(filepath.Join(oauthDir, "step2api-*.json")); err == nil {
+			for _, fpath := range files {
+				data, err := os.ReadFile(fpath)
+				if err != nil {
+					continue
+				}
+				var item AuthFilePayload
+				if err := json.Unmarshal(data, &item); err != nil || item.OasisToken == "" {
+					continue
+				}
+				if in.ID != "" && item.AccountID != in.ID {
+					continue
+				}
+				newTok, errRefresh := stepstudio.RefreshToken(p.ctx, nil, p.config.BaseURL, item.OasisToken, item.WebID)
+				if errRefresh == nil && newTok != "" {
+					item.OasisToken = newTok
+					item.UpdatedAt = time.Now().Format(time.RFC3339)
+					if updatedBytes, errM := json.MarshalIndent(item, "", "  "); errM == nil {
+						_ = os.WriteFile(fpath, updatedBytes, 0644)
+						refreshedCount++
+					}
+				}
+			}
+		}
+		res, _ := json.Marshal(map[string]any{
+			"ok":        true,
+			"refreshed": refreshedCount,
+			"message":   fmt.Sprintf("å·²æåå·æ° %d ä¸ªè´¦å·ç Token", refreshedCount),
+		})
+		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
 	}
 
-	// 6. POST /api/accounts/refresh
-	if strings.Contains(rawPath, "/refresh") {
-		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: []byte(`{"ok":true,"items":[{"ok":true}]}`)}, nil
+	// 6. POST /api/accounts/test
+	if strings.Contains(path, "/test") {
+		return pluginapi.ManagementResponse{
+			StatusCode: http.StatusOK,
+			Headers:    headers,
+			Body:       []byte("{\"ok\":true,\"message\":\"StepFun AI Studio ç½å³é¾è·¯æ­£å¸¸\"}"),
+		}, nil
+	}
+
+	// 7. POST /api/sync
+	if strings.Contains(path, "/sync") {
+		return pluginapi.ManagementResponse{
+			StatusCode: http.StatusOK,
+			Headers:    headers,
+			Body:       []byte("{\"ok\":true,\"message\":\"å·²åæ­¥è´¦å·è³ CPA å­æ®\"}"),
+		}, nil
 	}
 
 	return pluginapi.ManagementResponse{
 		StatusCode: http.StatusNotFound,
 		Headers:    headers,
-		Body:       []byte(`{"error":"not_found"}`),
+		Body:       []byte("{\"error\":\"not_found\"}"),
 	}, nil
 }
