@@ -9,9 +9,10 @@ import (
 )
 
 func (p *Plugin) handleModelStatic(raw []byte) (any, error) {
+	models := stepstudio.BuildPluginStaticModels()
 	return pluginapi.ModelResponse{
 		Provider: ProviderID,
-		Models:   nil,
+		Models:   models,
 	}, nil
 }
 
