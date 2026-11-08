@@ -9,15 +9,18 @@ import (
 )
 
 func (p *Plugin) handleModelStatic(raw []byte) (any, error) {
+	return pluginapi.ModelResponse{
+		Provider: ProviderID,
+		Models:   nil,
+	}, nil
+}
+
+func (p *Plugin) handleModelForAuth(raw []byte) (any, error) {
 	models := stepstudio.BuildPluginStaticModels()
 	return pluginapi.ModelResponse{
 		Provider: ProviderID,
 		Models:   models,
 	}, nil
-}
-
-func (p *Plugin) handleModelForAuth(raw []byte) (any, error) {
-	return p.handleModelStatic(raw)
 }
 
 func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
@@ -35,7 +38,7 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 			TargetKind: pluginapi.ModelRouteTargetSelf,
 			Target:     PluginID,
 		}, nil
-}
+	}
 
 	if strings.HasPrefix(modelLower, "step2api/") || strings.HasPrefix(modelLower, "stepstudio/") {
 		return pluginapi.ModelRouteResponse{
@@ -43,7 +46,7 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 			TargetKind: pluginapi.ModelRouteTargetSelf,
 			Target:     PluginID,
 		}, nil
-}
+	}
 
 	if p.Config().RouteUnprefixedModels {
 		if _, ok := stepstudio.GetModelInfo(modelLower); ok {

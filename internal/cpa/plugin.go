@@ -179,7 +179,7 @@ func (p *Plugin) handleRegister(raw []byte) (any, error) {
 			ModelRouter:            true,
 			AuthProvider:           true,
 			Executor:               true,
-			ExecutorModelScope:     pluginapi.ExecutorModelScopeBoth,
+			ExecutorModelScope:     pluginapi.ExecutorModelScopeOAuth,
 			ExecutorInputFormats:   []string{"chat-completions", "responses", "anthropic"},
 			ExecutorOutputFormats:  []string{"chat-completions", "responses", "anthropic"},
 			RequestLifecyclePlugin: true,
