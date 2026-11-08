@@ -238,6 +238,13 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 		}, nil
 	}
 
+	// When CLIProxyAPI has already resolved candidate providers for an unprefixed model
+	// (e.g. Step Plan configured via openai-compatibility), do NOT hijack the traffic;
+	// let the host route natively across available providers without routing to Studio web.
+	if len(req.AvailableProviders) > 0 {
+		return pluginapi.ModelRouteResponse{Handled: false}, nil
+	}
+
 	if p.Config().RouteUnprefixedModels {
 		if _, ok := stepstudio.GetModelInfo(cleanModel); ok {
 			return pluginapi.ModelRouteResponse{
