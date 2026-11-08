@@ -131,6 +131,17 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
 	if err != nil {
 		cancel()
+		if apiErr, ok := err.(*stepstudio.APIError); ok && apiErr != nil {
+			errCode := "upstream_error"
+			if apiErr.BizCode == "CENSORED" {
+				errCode = "content_filter"
+			}
+			msg := fmt.Sprintf("StepFun 审核拦截: %s", apiErr.Message)
+			if apiErr.RiskDecision != "" {
+				msg += fmt.Sprintf(" (risk_decision=%s)", apiErr.RiskDecision)
+			}
+			return nil, pluginabi.NewError(errCode, msg, apiErr.StatusCode)
+		}
 		return nil, fmt.Errorf("start upstream playground stream failed: %w", err)
 	}
 
@@ -150,7 +161,20 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 			}
 		}
 		if sErr := <-errCh; sErr != nil {
-			pErr := pluginabi.NewError("upstream_stream_error", sErr.Error(), http.StatusBadGateway)
+			status := http.StatusBadGateway
+			code := "upstream_stream_error"
+			msg := sErr.Error()
+			if apiErr, ok := sErr.(*stepstudio.APIError); ok && apiErr != nil {
+				status = apiErr.StatusCode
+				if apiErr.BizCode == "CENSORED" {
+					code = "content_filter"
+					msg = fmt.Sprintf("StepFun 审核拦截: %s", apiErr.Message)
+					if apiErr.RiskDecision != "" {
+						msg += fmt.Sprintf(" (risk_decision=%s)", apiErr.RiskDecision)
+					}
+				}
+			}
+			pErr := pluginabi.NewError(code, msg, status)
 			_ = p.closeStream(streamID, pErr)
 			return
 		}
@@ -218,6 +242,17 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 
 	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
 	if err != nil {
+		if apiErr, ok := err.(*stepstudio.APIError); ok && apiErr != nil {
+			errCode := "upstream_error"
+			if apiErr.BizCode == "CENSORED" {
+				errCode = "content_filter"
+			}
+			msg := fmt.Sprintf("StepFun 审核拦截: %s", apiErr.Message)
+			if apiErr.RiskDecision != "" {
+				msg += fmt.Sprintf(" (risk_decision=%s)", apiErr.RiskDecision)
+			}
+			return nil, pluginabi.NewError(errCode, msg, apiErr.StatusCode)
+		}
 		return nil, err
 	}
 
@@ -240,6 +275,17 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	}
 
 	if sErr := <-errCh; sErr != nil {
+		if apiErr, ok := sErr.(*stepstudio.APIError); ok && apiErr != nil {
+			errCode := "upstream_error"
+			if apiErr.BizCode == "CENSORED" {
+				errCode = "content_filter"
+			}
+			msg := fmt.Sprintf("StepFun 审核拦截: %s", apiErr.Message)
+			if apiErr.RiskDecision != "" {
+				msg += fmt.Sprintf(" (risk_decision=%s)", apiErr.RiskDecision)
+			}
+			return nil, pluginabi.NewError(errCode, msg, apiErr.StatusCode)
+		}
 		return nil, sErr
 	}
 

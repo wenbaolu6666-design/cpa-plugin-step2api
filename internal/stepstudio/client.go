@@ -118,6 +118,22 @@ type TurnStreamBody struct {
 	Chat           PlaygroundChatRequest `json:"chat"`
 }
 
+type APIError struct {
+	StatusCode   int    `json:"status_code"`
+	Code         int    `json:"code"`
+	BizCode      string `json:"biz_code"`
+	Message      string `json:"message"`
+	RiskDecision string `json:"risk_decision,omitempty"`
+	Raw          string `json:"raw,omitempty"`
+}
+
+func (e *APIError) Error() string {
+	if e.BizCode != "" {
+		return fmt.Sprintf("stepfun upstream http %d (biz_code=%s): %s", e.StatusCode, e.BizCode, e.Message)
+	}
+	return fmt.Sprintf("stepfun upstream http %d: %s", e.StatusCode, e.Message)
+}
+
 type Client struct {
 	baseURL    string
 	token      string
@@ -402,6 +418,24 @@ func (c *Client) StreamPlayground(
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
 		errBytes, _ := io.ReadAll(resp.Body)
+		var apiErrPayload struct {
+			Code    int    `json:"code"`
+			BizCode string `json:"biz_code"`
+			Message string `json:"message"`
+			Data    struct {
+				RiskDecision string `json:"risk_decision"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(errBytes, &apiErrPayload) == nil && apiErrPayload.BizCode != "" {
+			return nil, nil, &APIError{
+				StatusCode:   resp.StatusCode,
+				Code:         apiErrPayload.Code,
+				BizCode:      apiErrPayload.BizCode,
+				Message:      apiErrPayload.Message,
+				RiskDecision: apiErrPayload.Data.RiskDecision,
+				Raw:          string(errBytes),
+			}
+		}
 		return nil, nil, fmt.Errorf("upstream stream returned http %d: %s", resp.StatusCode, string(errBytes))
 	}
 
@@ -438,6 +472,20 @@ func (c *Client) StreamPlayground(
 				if eventData.Len() > 0 {
 					var ev StudioEvent
 					if err := json.Unmarshal([]byte(eventData.String()), &ev); err == nil {
+						if ev.Type == EventError {
+							var errData ErrorData
+							_ = json.Unmarshal(ev.Data, &errData)
+							statusCode := http.StatusInternalServerError
+							if errData.Code == "CENSORED" {
+								statusCode = http.StatusBadRequest
+							}
+							errCh <- &APIError{
+								StatusCode: statusCode,
+								BizCode:    errData.Code,
+								Message:    errData.Message,
+							}
+							return
+						}
 						eventsCh <- ev
 						if ev.Type == EventMessageStop {
 							return
