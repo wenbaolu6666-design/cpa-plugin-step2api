@@ -15,14 +15,16 @@ import (
 )
 
 type AuthFilePayload struct {
-	Type       string `json:"type"`
-	Provider   string `json:"provider,omitempty"`
-	AccountID  string `json:"account_id,omitempty"`
-	Name       string `json:"name,omitempty"`
-	Phone      string `json:"phone,omitempty"`
-	OasisToken string `json:"oasis_token,omitempty"`
-	WebID      string `json:"web_id,omitempty"`
-	UpdatedAt  string `json:"updated_at,omitempty"`
+	Type           string   `json:"type"`
+	Provider       string   `json:"provider,omitempty"`
+	AccountID      string   `json:"account_id,omitempty"`
+	Name           string   `json:"name,omitempty"`
+	Phone          string   `json:"phone,omitempty"`
+	OasisToken     string   `json:"oasis_token,omitempty"`
+	WebID          string   `json:"web_id,omitempty"`
+	Disabled       bool     `json:"disabled,omitempty"`
+	ExcludedModels []string `json:"excluded_models,omitempty"`
+	UpdatedAt      string   `json:"updated_at,omitempty"`
 }
 
 type rpcIdentifierResponse struct {
