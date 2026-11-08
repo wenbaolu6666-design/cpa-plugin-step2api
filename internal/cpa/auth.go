@@ -51,7 +51,7 @@ type rpcAuthRefreshRequest struct {
 func (p *Plugin) handleAuthIdentifier() (any, error) {
 	return rpcIdentifierResponse{
 		Identifier:          ProviderID,
-		Identifiers:         []string{"step2api", "stepstudio", "stepfun"},
+		Identifiers:         nil,
 		CredentialProviders: []string{"step2api", "stepstudio", "stepfun"},
 	}, nil
 }
