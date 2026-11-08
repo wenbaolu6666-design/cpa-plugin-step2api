@@ -1,6 +1,8 @@
 package cpa
 
 import (
+	"os"
+	"path/filepath"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,19 +36,53 @@ func (p *Plugin) handleExecutorIdentifier() (any, error) {
 	}, nil
 }
 
-func (p *Plugin) extractToken(storageJSON []byte, metadata map[string]any) string {
+func (p *Plugin) extractCredentials(storageJSON []byte, metadata map[string]any) (token, webID string) {
 	if len(metadata) > 0 {
 		if tok, ok := metadata["oasis_token"].(string); ok && strings.TrimSpace(tok) != "" {
-			return strings.TrimSpace(tok)
+			token = strings.TrimSpace(tok)
+		}
+		if w, ok := metadata["web_id"].(string); ok && strings.TrimSpace(w) != "" {
+			webID = strings.TrimSpace(w)
 		}
 	}
 	if len(storageJSON) > 0 {
 		var payload AuthFilePayload
-		if err := json.Unmarshal(storageJSON, &payload); err == nil && payload.OasisToken != "" {
-			return strings.TrimSpace(payload.OasisToken)
+		if err := json.Unmarshal(storageJSON, &payload); err == nil {
+			if token == "" && payload.OasisToken != "" {
+				token = strings.TrimSpace(payload.OasisToken)
+			}
+			if webID == "" && payload.WebID != "" {
+				webID = strings.TrimSpace(payload.WebID)
+			}
 		}
 	}
-	return ""
+	if token == "" || webID == "" {
+		oauthDir := resolveOAuthDir()
+		if files, err := filepath.Glob(filepath.Join(oauthDir, "step2api-*.json")); err == nil && len(files) > 0 {
+			for _, f := range files {
+				if data, err := os.ReadFile(f); err == nil {
+					var item AuthFilePayload
+					if err := json.Unmarshal(data, &item); err == nil {
+						if token == "" && item.OasisToken != "" {
+							token = item.OasisToken
+						}
+						if webID == "" && item.WebID != "" {
+							webID = item.WebID
+						}
+					}
+				}
+			}
+		}
+	}
+	if webID == "" && token != "" {
+		webID = stepstudio.ExtractDeviceID(token)
+	}
+	return token, webID
+}
+
+func (p *Plugin) extractToken(storageJSON []byte, metadata map[string]any) string {
+	tok, _ := p.extractCredentials(storageJSON, metadata)
+	return tok
 }
 
 func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
@@ -55,7 +91,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		return nil, fmt.Errorf("decode executor.execute_stream request: %w", err)
 	}
 
-	token := p.extractToken(req.StorageJSON, req.AuthMetadata)
+	token, webID := p.extractCredentials(req.StorageJSON, req.AuthMetadata)
 	if token == "" {
 		return nil, pluginabi.NewError("unauthorized", "no StepFun Oasis-Token found in credentials", http.StatusUnauthorized)
 	}
@@ -66,7 +102,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		return nil, fmt.Errorf("parse request payload: %w", err)
 	}
 
-	client := stepstudio.NewClient(p.Config().BaseURL, token, "", nil)
+	client := stepstudio.NewClient(p.Config().BaseURL, token, webID, nil)
 
 	ctx, cancel := context.WithTimeout(p.ctx, 10*time.Minute)
 	convID, err := client.CreateConversation(ctx)
@@ -118,6 +154,12 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 			_ = p.closeStream(streamID, pErr)
 			return
 		}
+		if !trans.SentFinish {
+			stop := "stop"
+			if chunk := trans.FinalChunk(&stop, nil); chunk != nil {
+				_ = p.emitStreamChunk(streamID, chunk)
+			}
+		}
 		_ = p.closeStream(streamID, nil)
 	}()
 
@@ -137,7 +179,7 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		return nil, err
 	}
 
-	token := p.extractToken(req.StorageJSON, req.AuthMetadata)
+	token, webID := p.extractCredentials(req.StorageJSON, req.AuthMetadata)
 	if token == "" {
 		return nil, pluginabi.NewError("unauthorized", "no StepFun Oasis-Token found in credentials", http.StatusUnauthorized)
 	}
@@ -148,7 +190,7 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		return nil, err
 	}
 
-	client := stepstudio.NewClient(p.Config().BaseURL, token, "", nil)
+	client := stepstudio.NewClient(p.Config().BaseURL, token, webID, nil)
 	ctx, cancel := context.WithTimeout(p.ctx, 5*time.Minute)
 	defer cancel()
 

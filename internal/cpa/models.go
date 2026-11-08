@@ -32,16 +32,16 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 	if prefixLower != "" && strings.HasPrefix(modelLower, prefixLower) {
 		return pluginapi.ModelRouteResponse{
 			Handled:    true,
-			TargetKind: pluginapi.ModelRouteTargetExecutor,
-			Target:     ProviderID,
+			TargetKind: pluginapi.ModelRouteTargetSelf,
+			Target:     PluginID,
 		}, nil
 }
 
 	if strings.HasPrefix(modelLower, "step2api/") || strings.HasPrefix(modelLower, "stepstudio/") {
 		return pluginapi.ModelRouteResponse{
 			Handled:    true,
-			TargetKind: pluginapi.ModelRouteTargetExecutor,
-			Target:     ProviderID,
+			TargetKind: pluginapi.ModelRouteTargetSelf,
+			Target:     PluginID,
 		}, nil
 }
 
@@ -49,15 +49,15 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 		if _, ok := stepstudio.GetModelInfo(modelLower); ok {
 			return pluginapi.ModelRouteResponse{
 				Handled:    true,
-				TargetKind: pluginapi.ModelRouteTargetExecutor,
-				Target:     ProviderID,
+				TargetKind: pluginapi.ModelRouteTargetSelf,
+				Target:     PluginID,
 			}, nil
 		}
 		if strings.HasPrefix(modelLower, "step-") {
 			return pluginapi.ModelRouteResponse{
 				Handled:    true,
-				TargetKind: pluginapi.ModelRouteTargetExecutor,
-				Target:     ProviderID,
+				TargetKind: pluginapi.ModelRouteTargetSelf,
+				Target:     PluginID,
 			}, nil
 		}
 	}
