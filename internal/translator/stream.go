@@ -14,8 +14,9 @@ type StreamTranslator struct {
 	ID        string
 	Created   int64
 	Model     string
-	SentRole  bool
-	MessageID string
+	SentRole   bool
+	SentFinish bool
+	MessageID  string
 }
 
 func NewStreamTranslator(model string) *StreamTranslator {
@@ -156,10 +157,16 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 			finish = strings.TrimPrefix(finish, "finish_reason_")
 		}
 		frame := t.makeDeltaChunk(map[string]any{}, &finish, usageMap)
+		t.SentFinish = true
 		out = append(out, frame)
 
 	case stepstudio.EventMessageStop:
-		out = append(out, []byte("data: [DONE]\n\n"))
+		if !t.SentFinish {
+			finish := "stop"
+			frame := t.makeDeltaChunk(map[string]any{}, &finish, nil)
+			t.SentFinish = true
+			out = append(out, frame)
+		}
 	}
 
 	return out
@@ -183,4 +190,12 @@ func (t *StreamTranslator) makeDeltaChunk(delta map[string]any, finishReason *st
 	}
 	b, _ := json.Marshal(frame)
 	return []byte(fmt.Sprintf("data: %s\n\n", string(b)))
+}
+
+func (t *StreamTranslator) FinalChunk(finishReason *string, usage map[string]any) []byte {
+	if t.SentFinish {
+		return nil
+	}
+	t.SentFinish = true
+	return t.makeDeltaChunk(map[string]any{}, finishReason, usage)
 }

@@ -176,7 +176,7 @@ resp = client.chat.completions.create(model="step-5-preview", messages=[{"role":
 <div class="toast" id="toast"></div>
 
 <script>
-/*__INJECT_CPA_KEY__*/
+
 
 const $ = (id) => document.getElementById(id);
 let panelToken = sessionStorage.getItem("step2api_panel") || "";
@@ -195,11 +195,6 @@ let pending = 0;
 function getCPAKey() {
   const input = document.getElementById("mgmt-key");
   const badge = document.getElementById("key-badge");
-  if (window.__CPA_KEY__) {
-    if (input && !input.value) input.value = window.__CPA_KEY__;
-    if (badge) { badge.className = "pill ok"; badge.textContent = "密钥: 已自动注入"; }
-    return window.__CPA_KEY__;
-  }
   if (input && input.value.trim()) {
     if (badge) { badge.className = "pill ok"; badge.textContent = "密钥: 已配置"; }
     return input.value.trim();
