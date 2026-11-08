@@ -158,6 +158,7 @@ func (p *Plugin) handleRegister(raw []byte) (any, error) {
 			Version:          Version,
 			Author:           "WenPaul",
 			GitHubRepository: "https://github.com/wenbaolu6666-design/cpa-plugin-step2api",
+			Logo:             "https://www.stepfun.com/step_favicon.svg",
 			ConfigFields: []pluginapi.ConfigField{
 				{
 					Name:        "base_url",

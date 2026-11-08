@@ -19,6 +19,9 @@ func TestPluginLifecycle(t *testing.T) {
 	}
 	reg, ok := res.(rpcRegistration)
 	if !ok || reg.SchemaVersion != pluginabi.SchemaVersion || reg.Metadata.GitHubRepository == "" {
+	if reg.Metadata.Logo != "https://www.stepfun.com/step_favicon.svg" {
+		t.Errorf("expected logo to be set, got %q", reg.Metadata.Logo)
+	}
 		t.Errorf("unexpected register response: %v", res)
 	}
 	if !reg.Capabilities.QuotaProvider {
