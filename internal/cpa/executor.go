@@ -154,6 +154,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
 	if err != nil {
 		cancel()
+		p.noteStudioUpstreamFailure(cleanModel, err)
 		if pErr := pluginErrorFromUpstreamErr(err); pErr != nil {
 			return nil, pErr
 		}
@@ -176,6 +177,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 			}
 		}
 		if sErr := <-errCh; sErr != nil {
+			p.noteStudioUpstreamFailure(cleanModel, sErr)
 			pErr := pluginErrorFromUpstreamErr(sErr)
 			if pErr == nil {
 				pErr = pluginabi.NewError("upstream_stream_error", sErr.Error(), http.StatusBadGateway)
@@ -247,6 +249,7 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 
 	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
 	if err != nil {
+		p.noteStudioUpstreamFailure(cleanModel, err)
 		if pErr := pluginErrorFromUpstreamErr(err); pErr != nil {
 			return nil, pErr
 		}
@@ -272,6 +275,7 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	}
 
 	if sErr := <-errCh; sErr != nil {
+		p.noteStudioUpstreamFailure(cleanModel, sErr)
 		if pErr := pluginErrorFromUpstreamErr(sErr); pErr != nil {
 			return nil, pErr
 		}
