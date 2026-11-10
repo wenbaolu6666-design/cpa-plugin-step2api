@@ -45,13 +45,27 @@ func TestPluginLifecycle(t *testing.T) {
 		RequestedModel: "step-3.5-flash",
 	}
 	rawRoute, _ := json.Marshal(routeReq)
-	res, err = p.HandleMethod(pluginabi.MethodModelRoute, rawRoute)
-	if err != nil {
-		t.Fatalf("model.route failed: %v", err)
+	// The router performs a weighted fill between the Step Plan channel and this
+	// Studio channel (default 3:1), so a small sample must contain both outcomes.
+	handledToPlugin := 0
+	for i := 0; i < 8; i++ {
+		res, err = p.HandleMethod(pluginabi.MethodModelRoute, rawRoute)
+		if err != nil {
+			t.Fatalf("model.route failed: %v", err)
+		}
+		rResp, ok := res.(pluginapi.ModelRouteResponse)
+		if !ok {
+			t.Fatalf("unexpected route response type: %T", res)
+		}
+		if rResp.Handled {
+			if rResp.Target != ProviderID {
+				t.Fatalf("plugin route target = %q, want %q", rResp.Target, ProviderID)
+			}
+			handledToPlugin++
+		}
 	}
-	rResp, ok := res.(pluginapi.ModelRouteResponse)
-	if !ok || !rResp.Handled || rResp.Target != ProviderID {
-		t.Errorf("unexpected route decision: %v", res)
+	if handledToPlugin == 0 {
+		t.Errorf("weighted fill never routed to the plugin in 8 attempts")
 	}
 
 	println("STEP 4")

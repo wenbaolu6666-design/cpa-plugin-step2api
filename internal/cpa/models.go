@@ -241,17 +241,10 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 	if p.Config().RouteUnprefixedModels {
 		_, known := stepstudio.GetModelInfo(cleanModel)
 		if known || strings.HasPrefix(cleanModel, "step-") {
-			// Take over an unprefixed step model only with positive evidence that the
-			// other channel cannot serve it right now, or when no other provider
-			// publishes the model at all. A healthy Step Plan keeps the traffic.
-			hasOtherProvider := false
-			for _, provider := range req.AvailableProviders {
-				if !isOwnProviderKey(provider) {
-					hasOtherProvider = true
-					break
-				}
-			}
-			if p.modelBlocked(cleanModel) || (!hasOtherProvider && !p.otherProviderServesModelUsably(cleanModel)) {
+			// Weighted fill between the Step Plan channel and this Studio channel.
+			// Plan keeps the configured share; Studio takes the rest so both legs
+			// stay warm, and a Plan quota failure shifts all traffic to Studio.
+			if p.shouldRouteToStudio(cleanModel) {
 				return pluginapi.ModelRouteResponse{
 					Handled:    true,
 					TargetKind: pluginapi.ModelRouteTargetSelf,

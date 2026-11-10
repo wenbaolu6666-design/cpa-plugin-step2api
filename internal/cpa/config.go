@@ -10,7 +10,7 @@ const (
 	PluginID   = "step2api"
 	PluginName = "Step2API"
 	ProviderID = "step2api"
-	Version    = "1.0.18"
+	Version    = "1.0.19"
 )
 
 type PluginConfig struct {
@@ -19,6 +19,9 @@ type PluginConfig struct {
 	Proxy                 string `yaml:"proxy"`
 	ModelPrefix           string `yaml:"model_prefix"`
 	RouteUnprefixedModels bool   `yaml:"route_unprefixed_models"`
+	PlanWeight            int    `yaml:"plan_weight"`
+	StudioWeight          int    `yaml:"studio_weight"`
+	PlanProvider          string `yaml:"plan_provider"`
 	DefaultThinking       bool   `yaml:"default_thinking"`
 	DefaultEffort         string `yaml:"default_effort"`
 	SyncAuthFiles         bool   `yaml:"sync_auth_files"`
@@ -31,6 +34,9 @@ func DefaultPluginConfig() PluginConfig {
 		BaseURL:               "https://studio.stepfun.com",
 		ModelPrefix:           "step2api/",
 		RouteUnprefixedModels: true,
+		PlanWeight:            3,
+		StudioWeight:          1,
+		PlanProvider:          "openai-compatible-step",
 		DefaultThinking:       true,
 		DefaultEffort:         "medium",
 		SyncAuthFiles:         true,
