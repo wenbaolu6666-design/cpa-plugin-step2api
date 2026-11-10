@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,28 @@ import (
 	"github.com/WenPaul/cpa-plugin-step2api/internal/translator"
 	"github.com/google/uuid"
 )
+
+func pluginErrorFromUpstreamErr(err error) *pluginabi.Error {
+	apiErr, ok := err.(*stepstudio.APIError)
+	if !ok || apiErr == nil {
+		return nil
+	}
+	if apiErr.BizCode == "CENSORED" || strings.EqualFold(apiErr.RiskDecision, "BLOCK") {
+		msg := "StepFun 内容审核拦截: " + apiErr.Message
+		if apiErr.RiskDecision != "" {
+			msg += " (risk_decision=" + apiErr.RiskDecision + ")"
+		}
+		return pluginabi.NewError("content_filter", msg, http.StatusBadRequest)
+	}
+	status := apiErr.StatusCode
+	if status == 0 {
+		status = http.StatusBadGateway
+	}
+	if status == http.StatusTooManyRequests {
+		return pluginabi.NewError("upstream_rate_limited", "StepFun 上游限流/额度不足: "+apiErr.Message, http.StatusTooManyRequests)
+	}
+	return pluginabi.NewError("upstream_error", "StepFun 上游返回 http "+strconv.Itoa(status)+": "+apiErr.Message, status)
+}
 
 type rpcExecutorRequest struct {
 	pluginapi.ExecutorRequest
@@ -131,16 +154,8 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
 	if err != nil {
 		cancel()
-		if apiErr, ok := err.(*stepstudio.APIError); ok && apiErr != nil {
-			errCode := "upstream_error"
-			if apiErr.BizCode == "CENSORED" {
-				errCode = "content_filter"
-			}
-			msg := fmt.Sprintf("StepFun 审核拦截: %s", apiErr.Message)
-			if apiErr.RiskDecision != "" {
-				msg += fmt.Sprintf(" (risk_decision=%s)", apiErr.RiskDecision)
-			}
-			return nil, pluginabi.NewError(errCode, msg, apiErr.StatusCode)
+		if pErr := pluginErrorFromUpstreamErr(err); pErr != nil {
+			return nil, pErr
 		}
 		return nil, fmt.Errorf("start upstream playground stream failed: %w", err)
 	}
@@ -161,20 +176,10 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 			}
 		}
 		if sErr := <-errCh; sErr != nil {
-			status := http.StatusBadGateway
-			code := "upstream_stream_error"
-			msg := sErr.Error()
-			if apiErr, ok := sErr.(*stepstudio.APIError); ok && apiErr != nil {
-				status = apiErr.StatusCode
-				if apiErr.BizCode == "CENSORED" {
-					code = "content_filter"
-					msg = fmt.Sprintf("StepFun 审核拦截: %s", apiErr.Message)
-					if apiErr.RiskDecision != "" {
-						msg += fmt.Sprintf(" (risk_decision=%s)", apiErr.RiskDecision)
-					}
-				}
+			pErr := pluginErrorFromUpstreamErr(sErr)
+			if pErr == nil {
+				pErr = pluginabi.NewError("upstream_stream_error", sErr.Error(), http.StatusBadGateway)
 			}
-			pErr := pluginabi.NewError(code, msg, status)
 			_ = p.closeStream(streamID, pErr)
 			return
 		}
@@ -242,16 +247,8 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 
 	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
 	if err != nil {
-		if apiErr, ok := err.(*stepstudio.APIError); ok && apiErr != nil {
-			errCode := "upstream_error"
-			if apiErr.BizCode == "CENSORED" {
-				errCode = "content_filter"
-			}
-			msg := fmt.Sprintf("StepFun 审核拦截: %s", apiErr.Message)
-			if apiErr.RiskDecision != "" {
-				msg += fmt.Sprintf(" (risk_decision=%s)", apiErr.RiskDecision)
-			}
-			return nil, pluginabi.NewError(errCode, msg, apiErr.StatusCode)
+		if pErr := pluginErrorFromUpstreamErr(err); pErr != nil {
+			return nil, pErr
 		}
 		return nil, err
 	}
@@ -275,16 +272,8 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	}
 
 	if sErr := <-errCh; sErr != nil {
-		if apiErr, ok := sErr.(*stepstudio.APIError); ok && apiErr != nil {
-			errCode := "upstream_error"
-			if apiErr.BizCode == "CENSORED" {
-				errCode = "content_filter"
-			}
-			msg := fmt.Sprintf("StepFun 审核拦截: %s", apiErr.Message)
-			if apiErr.RiskDecision != "" {
-				msg += fmt.Sprintf(" (risk_decision=%s)", apiErr.RiskDecision)
-			}
-			return nil, pluginabi.NewError(errCode, msg, apiErr.StatusCode)
+		if pErr := pluginErrorFromUpstreamErr(sErr); pErr != nil {
+			return nil, pErr
 		}
 		return nil, sErr
 	}
