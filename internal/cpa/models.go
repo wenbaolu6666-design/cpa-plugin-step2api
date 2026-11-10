@@ -218,6 +218,11 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 	}
 
 	cleanModel := CleanModelName(modelLower, prefixLower)
+	// Strip a thinking/effort suffix such as "step-5-preview(max)" so catalog
+	// lookups and failure memory keys stay aligned with the base model id.
+	if i := strings.IndexByte(cleanModel, '('); i > 0 {
+		cleanModel = strings.TrimSpace(cleanModel[:i])
+	}
 	if isModelGloballyOrAllAccountsExcluded(cleanModel, nil, accounts) {
 		return pluginapi.ModelRouteResponse{Handled: false}, nil
 	}

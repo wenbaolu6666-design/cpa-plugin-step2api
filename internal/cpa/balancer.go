@@ -2,7 +2,6 @@ package cpa
 
 import (
 	"net/http"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -14,7 +13,7 @@ const studioBlockTTL = 60 * time.Second
 var legCounter uint64
 
 func (p *Plugin) studioBlocked(model string) bool {
-	return p.modelBlocked("studio:" + strings.ToLower(strings.TrimSpace(model)))
+	return p.modelBlocked("studio:" + normalizeBlockKey(model))
 }
 
 func (p *Plugin) markStudioBlocked(model string) {
@@ -26,7 +25,7 @@ func (p *Plugin) markStudioBlocked(model string) {
 // continuously exercised. A recorded Plan quota failure or a Studio saturation
 // temporarily overrides the weights.
 func (p *Plugin) shouldRouteToStudio(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
+	model = normalizeBlockKey(model)
 	if model == "" {
 		return false
 	}

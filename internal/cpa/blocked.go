@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	blockedTTLQuota   = 10 * time.Minute
+	blockedTTLQuota   = 60 * time.Minute
 	blockedTTLRateLimit = 90 * time.Second
 )
 
@@ -23,8 +23,16 @@ func isUpstreamRateText(text string) bool {
 	return strings.Contains(lower, "rate_limited") || strings.Contains(lower, "concurrency") || strings.Contains(lower, "too many requests")
 }
 
+func normalizeBlockKey(model string) string {
+	key := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.IndexByte(key, '('); i > 0 {
+		key = strings.TrimSpace(key[:i])
+	}
+	return key
+}
+
 func (p *Plugin) markModelBlocked(model string, until time.Time) {
-	model = strings.ToLower(strings.TrimSpace(model))
+	model = normalizeBlockKey(model)
 	if model == "" || until.IsZero() {
 		return
 	}
@@ -37,7 +45,7 @@ func (p *Plugin) markModelBlocked(model string, until time.Time) {
 }
 
 func (p *Plugin) clearModelBlocked(model string) {
-	model = strings.ToLower(strings.TrimSpace(model))
+	model = normalizeBlockKey(model)
 	if model == "" {
 		return
 	}
@@ -47,7 +55,7 @@ func (p *Plugin) clearModelBlocked(model string) {
 }
 
 func (p *Plugin) modelBlocked(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
+	model = normalizeBlockKey(model)
 	if model == "" {
 		return false
 	}
@@ -69,7 +77,7 @@ func (p *Plugin) handleRequestComplete(raw []byte) (any, error) {
 	if model == "" {
 		return map[string]any{"completed": true}, nil
 	}
-	if req.Outcome != pluginapi.RequestCompletionFailed {
+	if req.Outcome == pluginapi.RequestCompletionCanceled {
 		return map[string]any{"completed": true}, nil
 	}
 	text := strings.ToLower(req.Error)
