@@ -49,6 +49,8 @@ type Plugin struct {
 	hostCall     HostCallFunc
 	loginStateMu sync.Mutex
 	loginStates  map[string]*loginSessionState
+	blockedMu    sync.RWMutex
+	blockedUntil map[string]time.Time
 }
 
 func NewPlugin(hostCall HostCallFunc) *Plugin {
@@ -59,6 +61,7 @@ func NewPlugin(hostCall HostCallFunc) *Plugin {
 		hostCall:    hostCall,
 		config:      DefaultPluginConfig(),
 		loginStates: make(map[string]*loginSessionState),
+		blockedUntil: make(map[string]time.Time),
 	}
 }
 
@@ -130,7 +133,7 @@ func (p *Plugin) HandleMethod(method string, raw []byte) (any, error) {
 	case pluginabi.MethodManagementHandle:
 		return p.handleManagementHandle(raw)
 	case pluginabi.MethodRequestComplete:
-		return map[string]any{"completed": true}, nil
+		return p.handleRequestComplete(raw)
 
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
