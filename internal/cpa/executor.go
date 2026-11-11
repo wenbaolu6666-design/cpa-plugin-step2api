@@ -18,6 +18,33 @@ import (
 	"github.com/google/uuid"
 )
 
+func isInvalidBodyError(err error) bool {
+	apiErr, ok := err.(*stepstudio.APIError)
+	if !ok || apiErr == nil {
+		return false
+	}
+	return apiErr.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(apiErr.Message), "invalid request body")
+}
+
+func clampExtractedForStudio(cleanModel string, extracted *translator.ExtractedRequest) {
+	if extracted == nil {
+		return
+	}
+	limit := 64000
+	if info, ok := stepstudio.GetModelInfo(cleanModel); ok && info.MaxTokens > 0 {
+		limit = info.MaxTokens
+	}
+	if extracted.MaxTokens <= 0 || extracted.MaxTokens > limit {
+		extracted.MaxTokens = limit
+	}
+	if extracted.Temperature < 0 {
+		extracted.Temperature = 0
+	}
+	if extracted.Temperature > 2 {
+		extracted.Temperature = 2
+	}
+}
+
 func pluginErrorFromUpstreamErr(err error) *pluginabi.Error {
 	apiErr, ok := err.(*stepstudio.APIError)
 	if !ok || apiErr == nil {
@@ -124,6 +151,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse request payload: %w", err)
 	}
+	clampExtractedForStudio(cleanModel, extracted)
 
 	client := stepstudio.NewClient(p.Config().BaseURL, token, webID, nil)
 
@@ -135,6 +163,9 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	}
 
 	turnText := translator.RenderTranscript(extracted.Messages)
+	if strings.TrimSpace(turnText) == "" {
+		turnText = "…"
+	}
 	chatReq := stepstudio.PlaygroundChatRequest{
 		Model: stepstudio.ChatModelPayload{
 			ModelID: cleanModel,
@@ -152,6 +183,12 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	}
 
 	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
+	if err != nil && isInvalidBodyError(err) {
+		retryReq := chatReq
+		retryReq.SystemPrompt = ""
+		retryReq.EnableWebSearch = false
+		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
+	}
 	if err != nil {
 		cancel()
 		p.noteStudioUpstreamFailure(cleanModel, err)
@@ -220,6 +257,7 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	clampExtractedForStudio(cleanModel, extracted)
 
 	client := stepstudio.NewClient(p.Config().BaseURL, token, webID, nil)
 	ctx, cancel := context.WithTimeout(p.ctx, 5*time.Minute)
@@ -231,6 +269,9 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	}
 
 	turnText := translator.RenderTranscript(extracted.Messages)
+	if strings.TrimSpace(turnText) == "" {
+		turnText = "…"
+	}
 	chatReq := stepstudio.PlaygroundChatRequest{
 		Model: stepstudio.ChatModelPayload{
 			ModelID: cleanModel,
@@ -248,6 +289,12 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	}
 
 	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
+	if err != nil && isInvalidBodyError(err) {
+		retryReq := chatReq
+		retryReq.SystemPrompt = ""
+		retryReq.EnableWebSearch = false
+		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
+	}
 	if err != nil {
 		p.noteStudioUpstreamFailure(cleanModel, err)
 		if pErr := pluginErrorFromUpstreamErr(err); pErr != nil {
