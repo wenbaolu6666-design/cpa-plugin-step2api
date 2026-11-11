@@ -56,11 +56,11 @@ type Plugin struct {
 func NewPlugin(hostCall HostCallFunc) *Plugin {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Plugin{
-		ctx:         ctx,
-		cancel:      cancel,
-		hostCall:    hostCall,
-		config:      DefaultPluginConfig(),
-		loginStates: make(map[string]*loginSessionState),
+		ctx:          ctx,
+		cancel:       cancel,
+		hostCall:     hostCall,
+		config:       DefaultPluginConfig(),
+		loginStates:  make(map[string]*loginSessionState),
 		blockedUntil: make(map[string]time.Time),
 	}
 }

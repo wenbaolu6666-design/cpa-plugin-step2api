@@ -14,6 +14,8 @@
 - **全模型流式接入**：完整支持 `step-3.5-flash`、`step-3.7-flash`、`step-5-preview`、`step-router-v1` 与 `step-audio-*`。
 - **深度思考与思维链透传**：原生抓取 `reasoning_delta` 并转译为 OpenAI `reasoning_content`，支持 `low`、`medium`、`high`、`xhigh` 思考档位。
 - **工具调用与联网检索**：支持将 `tools` 协议注入并抽取结构化 `tool_calls`，支持 `web_search` 开关。
+- **真实图片输入**：`image_url` / `input_image`（支持 `data:image/...;base64` 与 http(s) URL）会上传到 Studio 资产接口并以 `asset_ids` 随本轮对话发送，模型可直接识图。
+- **用量归因**：通过 provider 路由复用 core 的 `executorAdapter`，用量记录可正确标记 `auth_type=oauth`；目录同时暴露 `step2api/<model>` 前缀别名，确保插件执行器被 core 注册。
 - **上下文缓存与用量如实上报**：回传 `prompt_tokens_details.cached_tokens`，真实反映缓存命中情况。
 - **CLIProxyAPI 九大能力完整接入**：
   -c`auth_provider`：支持可视化登录与 `oauth/step2api-<account>.json` 批量凭据解析。

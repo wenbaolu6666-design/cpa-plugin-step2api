@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +22,7 @@ import (
 const (
 	CreateConversationPath     = "/api/step.openapi.devcenter.Dashboard/CreateConversation"
 	PlaygroundStreamPath       = "/api/stdhttp/v1/studio/stream"
+	StudioFileUploadPath       = "/api/stdhttp/v1/studio/file"
 	QueryStudioRateLimitPath   = "/api/step.openapi.devcenter.Dashboard/QueryStudioRateLimit"
 	GetStepPlanStatusPath      = "/api/step.openapi.devcenter.Dashboard/GetStepPlanStatus"
 	QueryAccountBalancePath    = "/api/step.openapi.devcenter.Dashboard/QueryAccountBalance"
@@ -347,6 +351,97 @@ func (c *Client) QueryStepPlanRateLimit(ctx context.Context) (*StepPlanRateLimit
 	return &res, nil
 }
 
+// UploadAsset uploads one image/file to Studio and returns its asset_id.
+func (c *Client) UploadAsset(ctx context.Context, filename, mimeType string, data []byte, width, height int) (string, error) {
+	_ = c.EnsureFreshToken(ctx)
+
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+		"name":     "file",
+		"filename": filename,
+	}))
+	header.Set("Content-Type", mimeType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		return "", fmt.Errorf("create upload part: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return "", fmt.Errorf("write upload part: %w", err)
+	}
+	if width > 0 && height > 0 {
+		if err := writer.WriteField("meta_data", fmt.Sprintf(`{"width":%d,"height":%d}`, width, height)); err != nil {
+			return "", fmt.Errorf("write upload metadata: %w", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("finalize upload body: %w", err)
+	}
+
+	assetID, status, err := c.postAsset(ctx, buf.Bytes(), writer.FormDataContentType())
+	if status == http.StatusUnauthorized {
+		if newTok, errRefresh := RefreshToken(ctx, c.httpClient, c.baseURL, c.GetToken(), c.webID); errRefresh == nil && newTok != "" {
+			c.SetToken(newTok)
+			assetID, _, err = c.postAsset(ctx, buf.Bytes(), writer.FormDataContentType())
+		}
+	}
+	return assetID, err
+}
+
+func (c *Client) postAsset(ctx context.Context, body []byte, contentType string) (string, int, error) {
+	targetURL := c.baseURL + StudioFileUploadPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		return "", 0, fmt.Errorf("create upload request: %w", err)
+	}
+	c.applyHeaders(req)
+	req.Header.Set("Content-Type", contentType)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("upload asset http error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		var payload struct {
+			Code    int    `json:"code"`
+			BizCode string `json:"biz_code"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(bodyBytes, &payload) == nil && (payload.BizCode != "" || payload.Message != "") {
+			return "", resp.StatusCode, &APIError{
+				StatusCode: resp.StatusCode,
+				Code:       payload.Code,
+				BizCode:    payload.BizCode,
+				Message:    payload.Message,
+				Raw:        string(bodyBytes),
+			}
+		}
+		return "", resp.StatusCode, fmt.Errorf("upload asset returned http %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var parsed struct {
+		Data struct {
+			Asset struct {
+				AssetID string `json:"asset_id"`
+			} `json:"asset"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
+		return "", resp.StatusCode, fmt.Errorf("decode upload asset response: %w", err)
+	}
+	if strings.TrimSpace(parsed.Data.Asset.AssetID) == "" {
+		return "", resp.StatusCode, fmt.Errorf("upload asset response missing asset_id: %s", string(bodyBytes))
+	}
+	return parsed.Data.Asset.AssetID, resp.StatusCode, nil
+}
+
 func (c *Client) CreateConversation(ctx context.Context) (string, error) {
 	_ = c.EnsureFreshToken(ctx)
 
@@ -487,7 +582,7 @@ func (c *Client) StreamPlayground(
 							return
 						}
 						eventsCh <- ev
-						if ev.Type == EventMessageStop {
+						if ev.Type == EventDone {
 							return
 						}
 					}

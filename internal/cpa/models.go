@@ -132,10 +132,10 @@ func (p *Plugin) handleModelStatic(raw []byte) (any, error) {
 		}
 	}
 
-	rawModels := stepstudio.BuildPluginStaticModels()
+	rawModels := buildCatalogModels()
 	var filtered []pluginapi.ModelInfo
 	for _, m := range rawModels {
-		if !isModelGloballyOrAllAccountsExcluded(m.ID, globalRules, accounts) {
+		if !isModelGloballyOrAllAccountsExcluded(catalogBaseModelID(m.ID), globalRules, accounts) {
 			filtered = append(filtered, m)
 		}
 	}
@@ -173,12 +173,12 @@ func (p *Plugin) handleModelForAuth(raw []byte) (any, error) {
 	accRules = append(accRules, globalRules...)
 	accRules = append(accRules, payload.ExcludedModels...)
 
-	rawModels := stepstudio.BuildPluginStaticModels()
+	rawModels := buildCatalogModels()
 	var filtered []pluginapi.ModelInfo
 	for _, m := range rawModels {
 		excluded := false
 		for _, r := range accRules {
-			if matchesPattern(m.ID, r) {
+			if matchesPattern(m.ID, r) || matchesPattern(catalogBaseModelID(m.ID), r) {
 				excluded = true
 				break
 			}
@@ -192,6 +192,32 @@ func (p *Plugin) handleModelForAuth(raw []byte) (any, error) {
 		Provider: ProviderID,
 		Models:   filtered,
 	}, nil
+}
+
+// buildCatalogModels exposes both the bare StepFun ids and the step2api/
+// prefixed aliases. The prefixed entries are not claimed by any native
+// provider, so core registers this plugin's executor and auth models, while
+// the bare ids keep the normal /v1/models surface intact.
+func buildCatalogModels() []pluginapi.ModelInfo {
+	base := stepstudio.BuildPluginStaticModels()
+	out := make([]pluginapi.ModelInfo, 0, len(base)*2)
+	for _, model := range base {
+		out = append(out, model)
+		alias := model
+		alias.ID = ProviderID + "/" + model.ID
+		if alias.DisplayName == "" {
+			alias.DisplayName = model.ID
+		}
+		out = append(out, alias)
+	}
+	return out
+}
+
+func catalogBaseModelID(id string) string {
+	id = strings.TrimSpace(id)
+	id = strings.TrimPrefix(id, ProviderID+"/")
+	id = strings.TrimPrefix(id, "stepstudio/")
+	return id
 }
 
 func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
@@ -218,6 +244,7 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 	}
 
 	cleanModel := CleanModelName(modelLower, prefixLower)
+	routeModel := cleanModel
 	// Strip a thinking/effort suffix such as "step-5-preview(max)" so catalog
 	// lookups and failure memory keys stay aligned with the base model id.
 	if i := strings.IndexByte(cleanModel, '('); i > 0 {
@@ -229,17 +256,19 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 
 	if prefixLower != "" && strings.HasPrefix(modelLower, prefixLower) {
 		return pluginapi.ModelRouteResponse{
-			Handled:    true,
-			TargetKind: pluginapi.ModelRouteTargetSelf,
-			Target:     PluginID,
+			Handled:     true,
+			TargetKind:  pluginapi.ModelRouteTargetProvider,
+			Target:      ProviderID,
+			TargetModel: routeModel,
 		}, nil
 	}
 
 	if strings.HasPrefix(modelLower, "step2api/") || strings.HasPrefix(modelLower, "stepstudio/") {
 		return pluginapi.ModelRouteResponse{
-			Handled:    true,
-			TargetKind: pluginapi.ModelRouteTargetSelf,
-			Target:     PluginID,
+			Handled:     true,
+			TargetKind:  pluginapi.ModelRouteTargetProvider,
+			Target:      ProviderID,
+			TargetModel: routeModel,
 		}, nil
 	}
 
@@ -251,9 +280,10 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 			// stay warm, and a Plan quota failure shifts all traffic to Studio.
 			if p.shouldRouteToStudio(cleanModel) {
 				return pluginapi.ModelRouteResponse{
-					Handled:    true,
-					TargetKind: pluginapi.ModelRouteTargetSelf,
-					Target:     PluginID,
+					Handled:     true,
+					TargetKind:  pluginapi.ModelRouteTargetProvider,
+					Target:      ProviderID,
+					TargetModel: routeModel,
 				}, nil
 			}
 			return pluginapi.ModelRouteResponse{Handled: false}, nil

@@ -2,13 +2,13 @@ package cpa
 
 import (
 	"context"
-	"math"
-	"strconv"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -219,8 +219,8 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 	// 3.5. POST /api/accounts/disable or PATCH /accounts/{id}
 	if strings.Contains(path, "/disable") || (strings.Contains(path, "/accounts/") && method == "PATCH") {
 		var in struct {
-			ID string `json:"id"`
-			Disabled bool `json:"disabled"`
+			ID       string `json:"id"`
+			Disabled bool   `json:"disabled"`
 		}
 		_ = json.Unmarshal(req.Body, &in)
 		accID := in.ID

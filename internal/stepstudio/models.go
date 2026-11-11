@@ -12,12 +12,12 @@ type ModelInfo struct {
 	Description       string   `json:"description"`
 	MaxTokens         int      `json:"max_tokens"`
 	ContextWindow     int      `json:"context_window"`
-	SupportsThinking  bool    `json:"supports_thinking"`
+	SupportsThinking  bool     `json:"supports_thinking"`
 	DefaultEffort     string   `json:"default_effort"`
 	AllowedEfforts    []string `json:"allowed_efforts"`
-	SupportsVision    bool    `json:"supports_vision"`
-	SupportsTools     bool    `json:"supports_tools"`
-	SupportsWebSearch bool    `json:"supports_web_search"`
+	SupportsVision    bool     `json:"supports_vision"`
+	SupportsTools     bool     `json:"supports_tools"`
+	SupportsWebSearch bool     `json:"supports_web_search"`
 }
 
 var SupportedModels = map[string]ModelInfo{
@@ -128,8 +128,8 @@ func BuildPluginStaticModels() []pluginapi.ModelInfo {
 	var list []pluginapi.ModelInfo
 	for _, m := range SupportedModels {
 		list = append(list, pluginapi.ModelInfo{
-			ID:     m.ID,
-			Object: "model",
+			ID:      m.ID,
+			Object:  "model",
 			OwnedBy: "stepfun",
 		})
 	}
