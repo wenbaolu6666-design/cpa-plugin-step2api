@@ -91,8 +91,11 @@ func ParseOpenAIRequest(payload []byte, defaultThinking bool, defaultEffort stri
 			content = c.String()
 		} else if c.IsArray() {
 			for _, part := range c.Array() {
-				if part.Get("type").String() == "text" {
+				switch part.Get("type").String() {
+				case "text", "input_text", "output_text":
 					content += part.Get("text").String()
+				case "image_url", "input_image":
+					content += "[image]"
 				}
 			}
 		}
