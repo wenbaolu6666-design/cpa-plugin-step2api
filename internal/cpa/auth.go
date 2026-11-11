@@ -93,6 +93,7 @@ func (p *Plugin) handleAuthParse(raw []byte) (any, error) {
 		"oasis_token": token,
 		"web_id":      payload.WebID,
 		"provider":    ProviderID,
+		"auth_kind":   "oauth",
 	}
 
 	return pluginapi.AuthParseResponse{
@@ -158,6 +159,7 @@ func (p *Plugin) handleAuthLoginPoll(raw []byte) (any, error) {
 					"account_id":  session.Account.AccountID,
 					"oasis_token": session.Account.OasisToken,
 					"web_id":      session.Account.WebID,
+					"auth_kind":   "oauth",
 				},
 			},
 		}, nil
@@ -181,6 +183,7 @@ func (p *Plugin) handleAuthLoginPoll(raw []byte) (any, error) {
 							"account_id":  item.AccountID,
 							"oasis_token": item.OasisToken,
 							"web_id":      item.WebID,
+							"auth_kind":   "oauth",
 						},
 					},
 				}, nil
