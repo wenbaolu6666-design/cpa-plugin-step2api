@@ -18,6 +18,39 @@ import (
 	"github.com/google/uuid"
 )
 
+func dumpInvalidBodyDebug(model string, payloadBytes []byte, chatReq stepstudio.PlaygroundChatRequest) {
+	type dump struct {
+		Model      string                            `json:"model"`
+		PayloadLen int                               `json:"payload_len"`
+		Payload    string                            `json:"payload"`
+		Content    string                            `json:"content"`
+		System     string                            `json:"system_prompt"`
+	}
+	payload := string(payloadBytes)
+	if len(payload) > 200000 {
+		payload = payload[:200000]
+	}
+	out := dump{
+		Model:      model,
+		PayloadLen: len(payloadBytes),
+		Payload:    payload,
+		Content:    chatReq.Content,
+		System:     chatReq.SystemPrompt,
+	}
+	raw, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(os.TempDir(), "step2api-invalid-body.json"), raw, 0o644)
+}
+
+func truncateTail(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[len(value)-limit:]
+}
+
 func isInvalidBodyError(err error) bool {
 	apiErr, ok := err.(*stepstudio.APIError)
 	if !ok || apiErr == nil {
@@ -184,10 +217,15 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 
 	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
 	if err != nil && isInvalidBodyError(err) {
+		dumpInvalidBodyDebug(req.Model, req.Payload, chatReq)
 		retryReq := chatReq
 		retryReq.SystemPrompt = ""
 		retryReq.EnableWebSearch = false
 		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
+		if err != nil && isInvalidBodyError(err) {
+			retryReq.Content = truncateTail(chatReq.Content, 30000)
+			eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
+		}
 	}
 	if err != nil {
 		cancel()
@@ -290,10 +328,15 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 
 	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
 	if err != nil && isInvalidBodyError(err) {
+		dumpInvalidBodyDebug(req.Model, req.Payload, chatReq)
 		retryReq := chatReq
 		retryReq.SystemPrompt = ""
 		retryReq.EnableWebSearch = false
 		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
+		if err != nil && isInvalidBodyError(err) {
+			retryReq.Content = truncateTail(chatReq.Content, 30000)
+			eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
+		}
 	}
 	if err != nil {
 		p.noteStudioUpstreamFailure(cleanModel, err)
