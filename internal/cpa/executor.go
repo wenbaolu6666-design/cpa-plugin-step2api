@@ -1,12 +1,17 @@
 package cpa
 
 import (
-	"os"
-	"path/filepath"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,11 +25,11 @@ import (
 
 func dumpInvalidBodyDebug(model string, payloadBytes []byte, chatReq stepstudio.PlaygroundChatRequest) {
 	type dump struct {
-		Model      string                            `json:"model"`
-		PayloadLen int                               `json:"payload_len"`
-		Payload    string                            `json:"payload"`
-		Content    string                            `json:"content"`
-		System     string                            `json:"system_prompt"`
+		Model      string `json:"model"`
+		PayloadLen int    `json:"payload_len"`
+		Payload    string `json:"payload"`
+		Content    string `json:"content"`
+		System     string `json:"system_prompt"`
 	}
 	payload := string(payloadBytes)
 	if len(payload) > 200000 {
@@ -168,6 +173,32 @@ func (p *Plugin) extractToken(storageJSON []byte, metadata map[string]any) strin
 	return tok
 }
 
+func uploadTurnImages(ctx context.Context, client *stepstudio.Client, refs []translator.ImageRef) ([]string, error) {
+	if len(refs) == 0 {
+		return []string{}, nil
+	}
+	assetIDs := make([]string, 0, len(refs))
+	for idx, ref := range refs {
+		data, mimeType, name, err := client.LoadImageData(ctx, ref.URL, ref.MIME, ref.Name)
+		if err != nil {
+			return nil, fmt.Errorf("image %d: %w", idx+1, err)
+		}
+		if strings.TrimSpace(mimeType) == "" {
+			mimeType = http.DetectContentType(data)
+		}
+		width, height := 0, 0
+		if cfg, _, errConfig := image.DecodeConfig(bytes.NewReader(data)); errConfig == nil {
+			width, height = cfg.Width, cfg.Height
+		}
+		assetID, errUpload := client.UploadAsset(ctx, name, mimeType, data, width, height)
+		if errUpload != nil {
+			return nil, fmt.Errorf("image %d: %w", idx+1, errUpload)
+		}
+		assetIDs = append(assetIDs, assetID)
+	}
+	return assetIDs, nil
+}
+
 func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	var req rpcExecutorRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -186,9 +217,14 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	}
 	clampExtractedForStudio(cleanModel, extracted)
 
-	client := stepstudio.NewClient(p.Config().BaseURL, token, webID, nil)
-
 	ctx, cancel := context.WithTimeout(p.ctx, 10*time.Minute)
+	client := stepstudio.NewClient(p.Config().BaseURL, token, webID, nil)
+	assetIDs, err := uploadTurnImages(ctx, client, extracted.Images)
+	if err != nil {
+		cancel()
+		return nil, pluginabi.NewError("image_upload_failed", "上传图片到 StepFun Studio 失败: "+err.Error(), http.StatusBadGateway)
+	}
+
 	convID, err := client.CreateConversation(ctx)
 	if err != nil {
 		cancel()
@@ -211,7 +247,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		},
 		Content:         turnText,
 		SystemPrompt:    extracted.SystemPrompt,
-		AssetIDs:        []string{},
+		AssetIDs:        assetIDs,
 		EnableWebSearch: extracted.EnableWebSearch,
 	}
 
@@ -300,6 +336,10 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	client := stepstudio.NewClient(p.Config().BaseURL, token, webID, nil)
 	ctx, cancel := context.WithTimeout(p.ctx, 5*time.Minute)
 	defer cancel()
+	assetIDs, err := uploadTurnImages(ctx, client, extracted.Images)
+	if err != nil {
+		return nil, pluginabi.NewError("image_upload_failed", "上传图片到 StepFun Studio 失败: "+err.Error(), http.StatusBadGateway)
+	}
 
 	convID, err := client.CreateConversation(ctx)
 	if err != nil {
@@ -322,7 +362,7 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		},
 		Content:         turnText,
 		SystemPrompt:    extracted.SystemPrompt,
-		AssetIDs:        []string{},
+		AssetIDs:        assetIDs,
 		EnableWebSearch: extracted.EnableWebSearch,
 	}
 
@@ -348,6 +388,7 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 
 	var contentBuilder strings.Builder
 	var reasoningBuilder strings.Builder
+	var finalUsage *stepstudio.UsageInfo
 
 	for ev := range eventsCh {
 		switch ev.Type {
@@ -360,6 +401,11 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 			var d stepstudio.DeltaData
 			if err := json.Unmarshal(ev.Data, &d); err == nil {
 				reasoningBuilder.WriteString(d.Delta)
+			}
+		case stepstudio.EventFinal:
+			var d stepstudio.FinalData
+			if err := json.Unmarshal(ev.Data, &d); err == nil {
+				finalUsage = d.Usage
 			}
 		}
 	}
@@ -388,6 +434,18 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 				"finish_reason": "stop",
 			},
 		},
+	}
+	if finalUsage != nil {
+		input := int(finalUsage.TokensIn)
+		output := int(finalUsage.TokensOut)
+		responseObj["usage"] = map[string]any{
+			"prompt_tokens":     input,
+			"completion_tokens": output,
+			"total_tokens":      input + output,
+			"prompt_tokens_details": map[string]any{
+				"cached_tokens": int(finalUsage.CachedTokens),
+			},
+		}
 	}
 	bodyBytes, _ := json.Marshal(responseObj)
 

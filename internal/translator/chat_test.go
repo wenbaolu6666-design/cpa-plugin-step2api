@@ -46,3 +46,34 @@ func TestRenderMultiTurnTranscript(t *testing.T) {
 		t.Errorf("unexpected multi-turn transcript: %s", tr)
 	}
 }
+
+func TestParseOpenAIRequestExtractsLastUserImage(t *testing.T) {
+	payload := []byte(`{
+		"model": "step-5-preview",
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "text", "text": "old"},
+				{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+			]},
+			{"role": "assistant", "content": "ok"},
+			{"role": "user", "content": [
+				{"type": "input_text", "text": "看图"},
+				{"type": "input_image", "image_url": "https://example.com/a.png"}
+			]}
+		]
+	}`)
+
+	req, err := ParseOpenAIRequest(payload, true, "medium")
+	if err != nil {
+		t.Fatalf("ParseOpenAIRequest failed: %v", err)
+	}
+	if len(req.Images) != 1 || req.Images[0].URL != "https://example.com/a.png" {
+		t.Fatalf("unexpected images: %#v", req.Images)
+	}
+	if req.Messages[2].Content != "看图" {
+		t.Errorf("unexpected last user content: %q", req.Messages[2].Content)
+	}
+	if !strings.Contains(req.Messages[0].Content, "[image]") {
+		t.Errorf("older image marker should be kept: %q", req.Messages[0].Content)
+	}
+}

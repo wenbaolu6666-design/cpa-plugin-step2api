@@ -29,11 +29,20 @@ type ChatMessage struct {
 	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
+// ImageRef is an image that should be uploaded to Studio and attached to the
+// current turn as an asset.
+type ImageRef struct {
+	URL  string
+	MIME string
+	Name string
+}
+
 type ExtractedRequest struct {
 	Model           string
 	Messages        []ChatMessage
 	SystemPrompt    string
 	Tools           []any
+	Images          []ImageRef
 	Thinking        bool
 	Effort          string
 	Temperature     float64
@@ -84,9 +93,11 @@ func ParseOpenAIRequest(payload []byte, defaultThinking bool, defaultEffort stri
 
 	var systemParts []string
 	messagesArray := parsed.Get("messages").Array()
+	lastUserIndex := -1
 	for _, m := range messagesArray {
 		role := m.Get("role").String()
 		content := ""
+		var images []ImageRef
 		if c := m.Get("content"); c.Type == gjson.String {
 			content = c.String()
 		} else if c.IsArray() {
@@ -95,6 +106,9 @@ func ParseOpenAIRequest(payload []byte, defaultThinking bool, defaultEffort stri
 				case "text", "input_text", "output_text":
 					content += part.Get("text").String()
 				case "image_url", "input_image":
+					if ref, ok := imageRefFromPart(part); ok {
+						images = append(images, ref)
+					}
 					content += "[image]"
 				}
 			}
@@ -118,6 +132,19 @@ func ParseOpenAIRequest(payload []byte, defaultThinking bool, defaultEffort stri
 			msg.ToolCalls = calls
 		}
 		req.Messages = append(req.Messages, msg)
+		if role == "user" {
+			lastUserIndex = len(req.Messages) - 1
+			req.Images = images
+		}
+	}
+
+	// Studio attaches assets to the current turn only; images from older turns
+	// stay as [image] markers in the rendered transcript.
+	if lastUserIndex >= 0 && len(req.Images) > 0 {
+		req.Messages[lastUserIndex].Content = strings.ReplaceAll(req.Messages[lastUserIndex].Content, "[image]", "")
+		if strings.TrimSpace(req.Messages[lastUserIndex].Content) == "" {
+			req.Messages[lastUserIndex].Content = "请查看附图。"
+		}
 	}
 
 	systemText := strings.Join(systemParts, "\n\n")
@@ -140,6 +167,32 @@ func ParseOpenAIRequest(payload []byte, defaultThinking bool, defaultEffort stri
 
 	req.SystemPrompt = systemText
 	return req, nil
+}
+
+func imageRefFromPart(part gjson.Result) (ImageRef, bool) {
+	raw := part.Get("image_url")
+	if !raw.Exists() {
+		raw = part.Get("image")
+	}
+	if !raw.Exists() {
+		return ImageRef{}, false
+	}
+	url := raw.String()
+	if raw.IsObject() {
+		url = raw.Get("url").String()
+	}
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return ImageRef{}, false
+	}
+	ref := ImageRef{URL: url}
+	if strings.HasPrefix(strings.ToLower(url), "data:") {
+		header, _, _ := strings.Cut(url, ",")
+		mediaType := strings.TrimPrefix(header, "data:")
+		mediaType, _, _ = strings.Cut(mediaType, ";")
+		ref.MIME = strings.TrimSpace(mediaType)
+	}
+	return ref, true
 }
 
 func RenderTranscript(messages []ChatMessage) string {

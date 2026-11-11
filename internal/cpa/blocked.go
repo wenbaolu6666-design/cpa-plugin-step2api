@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	blockedTTLQuota   = 12 * time.Hour
+	blockedTTLQuota     = 12 * time.Hour
 	blockedTTLRateLimit = 90 * time.Second
 )
 

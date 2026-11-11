@@ -11,9 +11,9 @@ import (
 )
 
 type StreamTranslator struct {
-	ID        string
-	Created   int64
-	Model     string
+	ID         string
+	Created    int64
+	Model      string
 	SentRole   bool
 	SentFinish bool
 	MessageID  string
@@ -140,17 +140,7 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	case stepstudio.EventMessageDelta:
 		var data stepstudio.MessageDeltaData
 		_ = json.Unmarshal(ev.Data, &data)
-		var usageMap map[string]any
-		if data.Usage != nil {
-			usageMap = map[string]any{
-				"prompt_tokens":     data.Usage.TokensIn,
-				"completion_tokens": data.Usage.TokensOut,
-				"total_tokens":      data.Usage.TokensIn + data.Usage.TokensOut,
-				"prompt_tokens_details": map[string]any{
-					"cached_tokens": data.Usage.CachedTokens,
-				},
-			}
-		}
+		usageMap := usageMapFrom(data.Usage)
 		finish := "stop"
 		if data.FinishReason != "" {
 			finish = strings.ToLower(data.FinishReason)
@@ -161,6 +151,18 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 		out = append(out, frame)
 
 	case stepstudio.EventMessageStop:
+		// Studio follows message_stop with a terminal "final" event that
+		// carries token usage. Wait for it instead of closing the stream now.
+	case stepstudio.EventFinal:
+		var data stepstudio.FinalData
+		_ = json.Unmarshal(ev.Data, &data)
+		if !t.SentFinish {
+			finish := "stop"
+			frame := t.makeDeltaChunk(map[string]any{}, &finish, usageMapFrom(data.Usage))
+			t.SentFinish = true
+			out = append(out, frame)
+		}
+	case stepstudio.EventDone:
 		if !t.SentFinish {
 			finish := "stop"
 			frame := t.makeDeltaChunk(map[string]any{}, &finish, nil)
@@ -170,6 +172,22 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	}
 
 	return out
+}
+
+func usageMapFrom(usage *stepstudio.UsageInfo) map[string]any {
+	if usage == nil {
+		return nil
+	}
+	input := int(usage.TokensIn)
+	output := int(usage.TokensOut)
+	return map[string]any{
+		"prompt_tokens":     input,
+		"completion_tokens": output,
+		"total_tokens":      input + output,
+		"prompt_tokens_details": map[string]any{
+			"cached_tokens": int(usage.CachedTokens),
+		},
+	}
 }
 
 func (t *StreamTranslator) makeDeltaChunk(delta map[string]any, finishReason *string, usage map[string]any) []byte {
