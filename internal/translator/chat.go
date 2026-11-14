@@ -8,7 +8,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const ToolProtocolTemplate = `You can call tools. A tool call MUST be emitted as a single JSON object and nothing else, exactly in this shape:
+const ToolProtocolTemplate = `You are in a client-managed tool loop. The client executes tools; you never execute them yourself. Never claim that a tool is unavailable, unsupported, or missing. If a tool is needed, emit exactly one JSON object and nothing else, in this shape:
 
 {"name": "<tool_name>", "arguments": {<arguments>}}
 
@@ -18,6 +18,8 @@ Rules:
 - Never wrap the JSON in markdown fences and never add prose around it.
 - When tool results are supplied, use them to answer the user normally.
 - If no tool from the list is needed, answer the user directly as plain text.
+- Tool execution is handled by the client after you emit the JSON. Do not refuse a call by saying the environment cannot run tools.
+%s
 
 Available tools (JSON):
 %s`
@@ -157,7 +159,7 @@ func ParseOpenAIRequest(payload []byte, defaultThinking bool, defaultEffort stri
 
 	if len(req.Tools) > 0 {
 		toolsJSON, _ := json.MarshalIndent(req.Tools, "", "  ")
-		protocol := fmt.Sprintf(ToolProtocolTemplate, string(toolsJSON))
+		protocol := fmt.Sprintf(ToolProtocolTemplate, toolChoiceDirective(parsed), string(toolsJSON))
 		if systemText != "" {
 			systemText += "\n\n" + protocol
 		} else {
@@ -193,6 +195,25 @@ func imageRefFromPart(part gjson.Result) (ImageRef, bool) {
 		ref.MIME = strings.TrimSpace(mediaType)
 	}
 	return ref, true
+}
+
+func toolChoiceDirective(parsed gjson.Result) string {
+	choice := parsed.Get("tool_choice")
+	if !choice.Exists() {
+		return ""
+	}
+	if choice.Type == gjson.String {
+		switch strings.ToLower(strings.TrimSpace(choice.String())) {
+		case "required", "any":
+			return "- This turn MUST call exactly one listed tool."
+		case "none":
+			return "- Do not call any tool this turn."
+		}
+	}
+	if name := strings.TrimSpace(choice.Get("function.name").String()); name != "" {
+		return fmt.Sprintf("- This turn MUST call the tool %q.", name)
+	}
+	return ""
 }
 
 func RenderTranscript(messages []ChatMessage) string {
