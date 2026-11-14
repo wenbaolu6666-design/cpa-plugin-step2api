@@ -297,8 +297,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 			return
 		}
 		if !trans.SentFinish {
-			stop := "stop"
-			if chunk := trans.FinalChunk(&stop, nil); chunk != nil {
+			for _, chunk := range trans.FinalChunks("stop", nil) {
 				_ = p.emitStreamChunk(streamID, chunk)
 			}
 		}
@@ -389,6 +388,13 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	var contentBuilder strings.Builder
 	var reasoningBuilder strings.Builder
 	var finalUsage *stepstudio.UsageInfo
+	type nativeToolCall struct {
+		ID   string
+		Name string
+		Args string
+	}
+	var nativeToolCalls []nativeToolCall
+	nativeToolIndex := map[int]int{}
 
 	for ev := range eventsCh {
 		switch ev.Type {
@@ -401,6 +407,34 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 			var d stepstudio.DeltaData
 			if err := json.Unmarshal(ev.Data, &d); err == nil {
 				reasoningBuilder.WriteString(d.Delta)
+			}
+		case stepstudio.EventToolCallStart:
+			var d stepstudio.ToolCallStartData
+			if err := json.Unmarshal(ev.Data, &d); err == nil {
+				pos, exists := nativeToolIndex[d.BlockIndex]
+				if !exists {
+					pos = len(nativeToolCalls)
+					nativeToolIndex[d.BlockIndex] = pos
+					nativeToolCalls = append(nativeToolCalls, nativeToolCall{})
+				}
+				nativeToolCalls[pos].ID = d.ToolCallID
+				nativeToolCalls[pos].Name = d.ToolName
+				nativeToolCalls[pos].Args = d.ArgumentsJSON
+			}
+		case stepstudio.EventToolCallDelta:
+			var d stepstudio.ToolCallDeltaData
+			if err := json.Unmarshal(ev.Data, &d); err == nil {
+				pos, exists := nativeToolIndex[d.BlockIndex]
+				if !exists {
+					pos = len(nativeToolCalls)
+					nativeToolIndex[d.BlockIndex] = pos
+					nativeToolCalls = append(nativeToolCalls, nativeToolCall{})
+				}
+				delta := d.Delta
+				if delta == "" {
+					delta = d.ProgressText
+				}
+				nativeToolCalls[pos].Args += delta
 			}
 		case stepstudio.EventFinal:
 			var d stepstudio.FinalData
@@ -418,6 +452,33 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		return nil, sErr
 	}
 
+	finishReason := "stop"
+	content := contentBuilder.String()
+	var toolCalls []map[string]any
+	if len(nativeToolCalls) > 0 {
+		finishReason = "tool_calls"
+		for _, call := range nativeToolCalls {
+			item := translator.OpenAIToolCall(call.Name, call.Args)
+			if call.ID != "" {
+				item["id"] = call.ID
+			}
+			toolCalls = append(toolCalls, item)
+		}
+		content = ""
+	} else if call, ok := translator.ParseToolCallText(content); ok {
+		finishReason = "tool_calls"
+		toolCalls = []map[string]any{translator.OpenAIToolCall(call.Name, call.Arguments)}
+		content = ""
+	}
+
+	message := map[string]any{
+		"role":              "assistant",
+		"content":           content,
+		"reasoning_content": reasoningBuilder.String(),
+	}
+	if len(toolCalls) > 0 {
+		message["tool_calls"] = toolCalls
+	}
 	responseObj := map[string]any{
 		"id":      "chatcmpl-" + uuid.NewString()[:8],
 		"object":  "chat.completion",
@@ -425,13 +486,9 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		"model":   cleanModel,
 		"choices": []map[string]any{
 			{
-				"index": 0,
-				"message": map[string]any{
-					"role":              "assistant",
-					"content":           contentBuilder.String(),
-					"reasoning_content": reasoningBuilder.String(),
-				},
-				"finish_reason": "stop",
+				"index":         0,
+				"message":       message,
+				"finish_reason": finishReason,
 			},
 		},
 	}

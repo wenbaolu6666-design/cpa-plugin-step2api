@@ -11,12 +11,16 @@ import (
 )
 
 type StreamTranslator struct {
-	ID         string
-	Created    int64
-	Model      string
-	SentRole   bool
-	SentFinish bool
-	MessageID  string
+	ID           string
+	Created      int64
+	Model        string
+	SentRole     bool
+	SentFinish   bool
+	MessageID    string
+	textBuffer   strings.Builder
+	textStreamed bool
+	bufferText   bool
+	hasToolCalls bool
 }
 
 func NewStreamTranslator(model string) *StreamTranslator {
@@ -90,16 +94,31 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	case stepstudio.EventTextDelta:
 		var data stepstudio.DeltaData
 		_ = json.Unmarshal(ev.Data, &data)
-		if data.Delta != "" {
-			frame := t.makeDeltaChunk(map[string]any{
-				"content": data.Delta,
-			}, nil, nil)
-			out = append(out, frame)
+		if data.Delta == "" {
+			break
 		}
+		if t.textStreamed {
+			out = append(out, t.makeDeltaChunk(map[string]any{"content": data.Delta}, nil, nil))
+			break
+		}
+		t.textBuffer.WriteString(data.Delta)
+		probe := strings.TrimLeft(t.textBuffer.String(), " \t\r\n")
+		if probe == "" {
+			break
+		}
+		if strings.HasPrefix(probe, "{") || strings.HasPrefix(probe, "```") {
+			t.bufferText = true
+			break
+		}
+		t.textStreamed = true
+		buffered := t.textBuffer.String()
+		t.textBuffer.Reset()
+		out = append(out, t.makeDeltaChunk(map[string]any{"content": buffered}, nil, nil))
 
 	case stepstudio.EventToolCallStart:
 		var data stepstudio.ToolCallStartData
 		_ = json.Unmarshal(ev.Data, &data)
+		t.hasToolCalls = true
 		if r := t.RoleChunk(); r != nil {
 			out = append(out, r)
 		}
@@ -140,15 +159,10 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	case stepstudio.EventMessageDelta:
 		var data stepstudio.MessageDeltaData
 		_ = json.Unmarshal(ev.Data, &data)
-		usageMap := usageMapFrom(data.Usage)
-		finish := "stop"
-		if data.FinishReason != "" {
-			finish = strings.ToLower(data.FinishReason)
-			finish = strings.TrimPrefix(finish, "finish_reason_")
+		if t.bufferText || t.hasToolCalls {
+			break
 		}
-		frame := t.makeDeltaChunk(map[string]any{}, &finish, usageMap)
-		t.SentFinish = true
-		out = append(out, frame)
+		out = append(out, t.finishFrame(data.FinishReason, usageMapFrom(data.Usage))...)
 
 	case stepstudio.EventMessageStop:
 		// Studio follows message_stop with a terminal "final" event that
@@ -156,19 +170,9 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	case stepstudio.EventFinal:
 		var data stepstudio.FinalData
 		_ = json.Unmarshal(ev.Data, &data)
-		if !t.SentFinish {
-			finish := "stop"
-			frame := t.makeDeltaChunk(map[string]any{}, &finish, usageMapFrom(data.Usage))
-			t.SentFinish = true
-			out = append(out, frame)
-		}
+		out = append(out, t.FinalChunks("", usageMapFrom(data.Usage))...)
 	case stepstudio.EventDone:
-		if !t.SentFinish {
-			finish := "stop"
-			frame := t.makeDeltaChunk(map[string]any{}, &finish, nil)
-			t.SentFinish = true
-			out = append(out, frame)
-		}
+		out = append(out, t.FinalChunks("", nil)...)
 	}
 
 	return out
@@ -210,10 +214,52 @@ func (t *StreamTranslator) makeDeltaChunk(delta map[string]any, finishReason *st
 	return []byte(fmt.Sprintf("data: %s\n\n", string(b)))
 }
 
-func (t *StreamTranslator) FinalChunk(finishReason *string, usage map[string]any) []byte {
+func (t *StreamTranslator) FinalChunks(reason string, usage map[string]any) [][]byte {
 	if t.SentFinish {
 		return nil
 	}
+	var out [][]byte
+	if !t.textStreamed && t.textBuffer.Len() > 0 {
+		text := t.textBuffer.String()
+		t.textBuffer.Reset()
+		if call, ok := ParseToolCallText(text); ok {
+			t.hasToolCalls = true
+			toolCall := OpenAIToolCall(call.Name, call.Arguments)
+			toolCall["index"] = 0
+			out = append(out, t.makeDeltaChunk(map[string]any{
+				"tool_calls": []map[string]any{toolCall},
+			}, nil, nil))
+		} else {
+			out = append(out, t.makeDeltaChunk(map[string]any{"content": text}, nil, nil))
+		}
+	}
+	out = append(out, t.finishFrame(reason, usage)...)
+	return out
+}
+
+func (t *StreamTranslator) finishFrame(reason string, usage map[string]any) [][]byte {
+	if t.SentFinish {
+		return nil
+	}
+	if t.hasToolCalls {
+		reason = "tool_calls"
+	} else if strings.TrimSpace(reason) == "" {
+		reason = "stop"
+	} else {
+		reason = strings.TrimPrefix(strings.ToLower(reason), "finish_reason_")
+	}
 	t.SentFinish = true
-	return t.makeDeltaChunk(map[string]any{}, finishReason, usage)
+	return [][]byte{t.makeDeltaChunk(map[string]any{}, &reason, usage)}
+}
+
+func (t *StreamTranslator) FinalChunk(finishReason *string, usage map[string]any) []byte {
+	reason := ""
+	if finishReason != nil {
+		reason = *finishReason
+	}
+	chunks := t.FinalChunks(reason, usage)
+	if len(chunks) == 0 {
+		return nil
+	}
+	return chunks[len(chunks)-1]
 }
