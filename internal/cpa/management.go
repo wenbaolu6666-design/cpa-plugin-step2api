@@ -296,13 +296,14 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		}
 
 		payload := AuthFilePayload{
-			Type:       "step2api",
-			Provider:   ProviderID,
-			AccountID:  accName,
-			Name:       accName,
-			OasisToken: tok,
-			WebID:      webid,
-			UpdatedAt:  time.Now().Format(time.RFC3339),
+			Type:          "step2api",
+			Provider:      ProviderID,
+			OAuthProvider: ProviderID,
+			AccountID:     accName,
+			Name:          accName,
+			OasisToken:    tok,
+			WebID:         webid,
+			UpdatedAt:     time.Now().Format(time.RFC3339),
 		}
 		data, _ := json.MarshalIndent(payload, "", "  ")
 		filePath := filepath.Join(oauthDir, "step2api-"+accName+".json")
