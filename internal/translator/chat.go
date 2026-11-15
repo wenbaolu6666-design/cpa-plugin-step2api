@@ -16,6 +16,7 @@ Rules:
 - The ONLY tools that exist are the ones listed below. Never call anything else.
 - Emit at most one tool call per turn.
 - Never wrap the JSON in markdown fences and never add prose around it.
+- The arguments field must be a JSON object. Nested arrays, objects, numbers and booleans must stay native JSON values; never encode them as strings.
 - When tool results are supplied, use them to answer the user normally.
 - If no tool from the list is needed, answer the user directly as plain text.
 - Tool execution is handled by the client after you emit the JSON. Do not refuse a call by saying the environment cannot run tools.

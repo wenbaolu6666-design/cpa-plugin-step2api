@@ -21,6 +21,7 @@ type StreamTranslator struct {
 	textStreamed bool
 	bufferText   bool
 	hasToolCalls bool
+	tools        []any
 }
 
 func NewStreamTranslator(model string) *StreamTranslator {
@@ -29,6 +30,12 @@ func NewStreamTranslator(model string) *StreamTranslator {
 		Created: time.Now().Unix(),
 		Model:   model,
 	}
+}
+
+// SetTools supplies the tool schemas used to repair stringified argument
+// values before they are sent to the client.
+func (t *StreamTranslator) SetTools(tools []any) {
+	t.tools = tools
 }
 
 func (t *StreamTranslator) RoleChunk() []byte {
@@ -222,7 +229,7 @@ func (t *StreamTranslator) FinalChunks(reason string, usage map[string]any) [][]
 	if !t.textStreamed && t.textBuffer.Len() > 0 {
 		text := t.textBuffer.String()
 		t.textBuffer.Reset()
-		if call, ok := ParseToolCallText(text); ok {
+		if call, ok := ParseToolCallTextWithTools(text, t.tools); ok {
 			t.hasToolCalls = true
 			toolCall := OpenAIToolCall(call.Name, call.Arguments)
 			toolCall["index"] = 0

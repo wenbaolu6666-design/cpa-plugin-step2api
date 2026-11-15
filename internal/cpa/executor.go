@@ -278,6 +278,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	}
 
 	trans := translator.NewStreamTranslator(cleanModel)
+	trans.SetTools(extracted.Tools)
 
 	go func() {
 		defer cancel()
@@ -458,14 +459,14 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	if len(nativeToolCalls) > 0 {
 		finishReason = "tool_calls"
 		for _, call := range nativeToolCalls {
-			item := translator.OpenAIToolCall(call.Name, call.Args)
+			item := translator.OpenAIToolCall(call.Name, translator.NormalizeToolArguments(call.Name, call.Args, extracted.Tools))
 			if call.ID != "" {
 				item["id"] = call.ID
 			}
 			toolCalls = append(toolCalls, item)
 		}
 		content = ""
-	} else if call, ok := translator.ParseToolCallText(content); ok {
+	} else if call, ok := translator.ParseToolCallTextWithTools(content, extracted.Tools); ok {
 		finishReason = "tool_calls"
 		toolCalls = []map[string]any{translator.OpenAIToolCall(call.Name, call.Arguments)}
 		content = ""
