@@ -136,7 +136,47 @@ func (p *Plugin) handleQuotaFetch(raw []byte) (any, error) {
 			},
 		}
 
-		// --- Group 1: 开放平台 (API / Step Plan) ---
+		// --- Group 1: AI Studio (网页会话) ---
+		var studioBuckets []pluginapi.QuotaBucket
+		now := time.Now()
+		nextMonth := time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, now.Location())
+
+		studioBuckets = append(studioBuckets, pluginapi.QuotaBucket{
+			Window:            "Studio 免费额度",
+			RemainingFraction: rateLimit.FreeRate,
+			ResetTime:         nextMonth.Format(time.RFC3339),
+			Description:       "每月 1 日刷新 · 会话优先消耗",
+		})
+
+		studioPlanResetStr := ""
+		if rateLimit.CreditRateLimit != nil && rateLimit.CreditRateLimit.SubscriptionCreditResetTime != "" && rateLimit.CreditRateLimit.SubscriptionCreditResetTime != "0" {
+			if sec, err := strconv.ParseInt(rateLimit.CreditRateLimit.SubscriptionCreditResetTime, 10, 64); err == nil && sec > 0 {
+				studioPlanResetStr = time.Unix(sec, 0).Format(time.RFC3339)
+			}
+		}
+		if hasPlan {
+			plusRemaining := 1.0
+			if rateLimit.CreditRateLimit != nil {
+				plusRemaining = math.Max(0, math.Min(1, rateLimit.CreditRateLimit.SubscriptionCreditLeftRate))
+			}
+			plusDesc := "Plus 待启用 · 免费额度用完后自动启用"
+			if rateLimit.FreeRate <= 0 {
+				plusDesc = fmt.Sprintf("套餐已用 %.0f%% · 免费额度已用完", math.Round((1-plusRemaining)*100))
+			}
+			studioBuckets = append(studioBuckets, pluginapi.QuotaBucket{
+				Window:            "Studio Plus 额度",
+				RemainingFraction: plusRemaining,
+				ResetTime:         studioPlanResetStr,
+				Description:       plusDesc,
+			})
+		}
+
+		resp.Groups = append(resp.Groups, pluginapi.QuotaGroup{
+			DisplayName: "AI Studio (网页会话)",
+			Buckets:     studioBuckets,
+		})
+
+		// --- Group 2: 开放平台 (API / Step Plan) ---
 		var platformBuckets []pluginapi.QuotaBucket
 		if platformPlan != nil && platformPlan.PlanCreditRateLimit != nil {
 			pRate := platformPlan.PlanCreditRateLimit
@@ -178,38 +218,6 @@ func (p *Plugin) handleQuotaFetch(raw []byte) (any, error) {
 			})
 		}
 
-		// --- Group 2: AI Studio (网页会话) ---
-		var studioBuckets []pluginapi.QuotaBucket
-		now := time.Now()
-		nextMonth := time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, now.Location())
-
-		studioBuckets = append(studioBuckets, pluginapi.QuotaBucket{
-			Window:            "Studio 免费额度",
-			RemainingFraction: rateLimit.FreeRate,
-			ResetTime:         nextMonth.Format(time.RFC3339),
-			Description:       "每月 1 日刷新 · 会话优先消耗",
-		})
-
-		studioPlanResetStr := ""
-		if rateLimit.CreditRateLimit != nil && rateLimit.CreditRateLimit.SubscriptionCreditResetTime != "" && rateLimit.CreditRateLimit.SubscriptionCreditResetTime != "0" {
-			if sec, err := strconv.ParseInt(rateLimit.CreditRateLimit.SubscriptionCreditResetTime, 10, 64); err == nil && sec > 0 {
-				studioPlanResetStr = time.Unix(sec, 0).Format(time.RFC3339)
-			}
-		}
-		if hasPlan {
-			studioBuckets = append(studioBuckets, pluginapi.QuotaBucket{
-				Window:            "Studio Plus 额度",
-				RemainingFraction: 1.0,
-				ResetTime:         studioPlanResetStr,
-				Description:       "Plus 待启用 · 免费额度用完后自动启用",
-			})
-		}
-
-		resp.Groups = append(resp.Groups, pluginapi.QuotaGroup{
-			DisplayName: "AI Studio (网页会话)",
-			Buckets:     studioBuckets,
-		})
-
 		// --- Summary 指标与资产 ---
 		if accountBalance != nil {
 			if bVal, err := strconv.ParseFloat(accountBalance.Balance, 64); err == nil {
@@ -231,15 +239,6 @@ func (p *Plugin) handleQuotaFetch(raw []byte) (any, error) {
 				})
 			}
 		}
-
-		freeUsedPct := math.Max(0, math.Min(100, (1.0-rateLimit.FreeRate)*100))
-		resp.Summary = append(resp.Summary, pluginapi.QuotaMetric{
-			Key:    "free_used",
-			Label:  "Studio 免费已用",
-			Value:  math.Round(freeUsedPct*100) / 100,
-			Unit:   "%",
-			Format: "number",
-		})
 
 		if planStatus != nil && planStatus.Subscription != nil && planStatus.Subscription.ExpiredAt != "" {
 			if sec, err := strconv.ParseInt(planStatus.Subscription.ExpiredAt, 10, 64); err == nil && sec > 0 {
