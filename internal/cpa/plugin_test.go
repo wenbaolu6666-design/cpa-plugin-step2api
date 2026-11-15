@@ -74,6 +74,10 @@ func TestPluginLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auth.identifier failed: %v", err)
 	}
+	idResp, ok := res.(rpcIdentifierResponse)
+	if !ok || len(idResp.Entries) != 1 || idResp.Entries[0].Identifier != ProviderID || idResp.Entries[0].Name != "Step2API" {
+		t.Fatalf("unexpected auth.identifier entries: %#v", res)
+	}
 
 	println("STEP 5")
 	// 5. Auth Parse
@@ -88,6 +92,9 @@ func TestPluginLifecycle(t *testing.T) {
 	pResp, ok := res.(pluginapi.AuthParseResponse)
 	if !ok || !pResp.Handled || pResp.Auth.ID != "test-user" {
 		t.Errorf("unexpected auth.parse result: %v", res)
+	}
+	if pResp.Auth.Metadata["oauth_provider"] != ProviderID || pResp.Auth.Attributes["oauth_provider"] != ProviderID {
+		t.Errorf("oauth_provider metadata missing: metadata=%v attributes=%v", pResp.Auth.Metadata, pResp.Auth.Attributes)
 	}
 
 	println("STEP 6")

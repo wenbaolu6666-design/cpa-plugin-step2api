@@ -17,6 +17,7 @@ import (
 type AuthFilePayload struct {
 	Type           string   `json:"type"`
 	Provider       string   `json:"provider,omitempty"`
+	OAuthProvider  string   `json:"oauth_provider,omitempty"`
 	AccountID      string   `json:"account_id,omitempty"`
 	Name           string   `json:"name,omitempty"`
 	Phone          string   `json:"phone,omitempty"`
@@ -28,9 +29,10 @@ type AuthFilePayload struct {
 }
 
 type rpcIdentifierResponse struct {
-	Identifier          string   `json:"identifier"`
-	Identifiers         []string `json:"identifiers,omitempty"`
-	CredentialProviders []string `json:"credential_providers,omitempty"`
+	Identifier          string                        `json:"identifier"`
+	Identifiers         []string                      `json:"identifiers,omitempty"`
+	CredentialProviders []string                      `json:"credential_providers,omitempty"`
+	Entries             []pluginapi.AuthProviderEntry `json:"entries,omitempty"`
 }
 
 type rpcAuthLoginStartRequest struct {
@@ -51,8 +53,15 @@ type rpcAuthRefreshRequest struct {
 func (p *Plugin) handleAuthIdentifier() (any, error) {
 	return rpcIdentifierResponse{
 		Identifier:          ProviderID,
-		Identifiers:         nil,
+		Identifiers:         []string{ProviderID},
 		CredentialProviders: []string{"step2api", "stepstudio", "stepfun"},
+		Entries: []pluginapi.AuthProviderEntry{
+			{
+				Identifier: ProviderID,
+				Name:       "Step2API",
+				Logo:       "https://www.stepfun.com/step_favicon.svg",
+			},
+		},
 	}, nil
 }
 
@@ -89,11 +98,12 @@ func (p *Plugin) handleAuthParse(raw []byte) (any, error) {
 	}
 
 	metadata := map[string]any{
-		"account_id":  accID,
-		"oasis_token": token,
-		"web_id":      payload.WebID,
-		"provider":    ProviderID,
-		"auth_kind":   "oauth",
+		"account_id":     accID,
+		"oasis_token":    token,
+		"web_id":         payload.WebID,
+		"provider":       ProviderID,
+		"oauth_provider": ProviderID,
+		"auth_kind":      "oauth",
 	}
 
 	return pluginapi.AuthParseResponse{
@@ -103,6 +113,9 @@ func (p *Plugin) handleAuthParse(raw []byte) (any, error) {
 			ID:       accID,
 			Label:    "StepFun Studio (" + accID + ")",
 			Metadata: metadata,
+			Attributes: map[string]string{
+				"oauth_provider": ProviderID,
+			},
 		},
 	}, nil
 }
@@ -156,10 +169,11 @@ func (p *Plugin) handleAuthLoginPoll(raw []byte) (any, error) {
 				ID:       session.Account.AccountID,
 				Label:    "StepFun Studio (" + session.Account.AccountID + ")",
 				Metadata: map[string]any{
-					"account_id":  session.Account.AccountID,
-					"oasis_token": session.Account.OasisToken,
-					"web_id":      session.Account.WebID,
-					"auth_kind":   "oauth",
+					"account_id":     session.Account.AccountID,
+					"oasis_token":    session.Account.OasisToken,
+					"web_id":         session.Account.WebID,
+					"oauth_provider": ProviderID,
+					"auth_kind":      "oauth",
 				},
 			},
 		}, nil
@@ -180,10 +194,11 @@ func (p *Plugin) handleAuthLoginPoll(raw []byte) (any, error) {
 						ID:       item.AccountID,
 						Label:    "StepFun Studio (" + item.AccountID + ")",
 						Metadata: map[string]any{
-							"account_id":  item.AccountID,
-							"oasis_token": item.OasisToken,
-							"web_id":      item.WebID,
-							"auth_kind":   "oauth",
+							"account_id":     item.AccountID,
+							"oasis_token":    item.OasisToken,
+							"web_id":         item.WebID,
+							"oauth_provider": ProviderID,
+							"auth_kind":      "oauth",
 						},
 					},
 				}, nil
@@ -218,6 +233,7 @@ func (p *Plugin) handleAuthRefresh(raw []byte) (any, error) {
 		meta = make(map[string]any)
 	}
 	meta["oasis_token"] = newTok
+	meta["oauth_provider"] = ProviderID
 
 	return pluginapi.AuthRefreshResponse{
 		Auth: pluginapi.AuthData{
