@@ -94,6 +94,14 @@ type StepPlanStatusResponse struct {
 	Status       int                   `json:"status"`
 	Desc         string                `json:"desc"`
 	Subscription *StepPlanSubscription `json:"subscription"`
+	NextRenew    *StepPlanNextRenew    `json:"next_renew"`
+}
+
+type StepPlanNextRenew struct {
+	PlanName     string `json:"plan_name"`
+	BillingCycle int    `json:"billing_cycle"`
+	Amount       string `json:"amount"`
+	NextDeductAt string `json:"next_deduct_at"`
 }
 
 type ChatModelConfig struct {

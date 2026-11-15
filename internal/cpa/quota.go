@@ -159,10 +159,20 @@ func (p *Plugin) handleQuotaFetch(raw []byte) (any, error) {
 			if rateLimit.CreditRateLimit != nil {
 				plusRemaining = math.Max(0, math.Min(1, rateLimit.CreditRateLimit.SubscriptionCreditLeftRate))
 			}
+			renewDesc := "自动续费已关闭"
+			if planStatus.Subscription.AutoRenew {
+				renewDesc = "自动续费已开启"
+			}
+			if planStatus.NextRenew != nil && planStatus.NextRenew.NextDeductAt != "" {
+				if sec, err := strconv.ParseInt(planStatus.NextRenew.NextDeductAt, 10, 64); err == nil && sec > 0 {
+					renewDesc += " · 下次扣费 " + time.Unix(sec, 0).Format("01-02 15:04")
+				}
+			}
 			plusDesc := "Plus 待启用 · 免费额度用完后自动启用"
 			if rateLimit.FreeRate <= 0 {
-				plusDesc = fmt.Sprintf("套餐已用 %.0f%% · 免费额度已用完", math.Round((1-plusRemaining)*100))
+				plusDesc = fmt.Sprintf("套餐已用 %.0f%%", math.Round((1-plusRemaining)*100))
 			}
+			plusDesc += " · " + renewDesc
 			studioBuckets = append(studioBuckets, pluginapi.QuotaBucket{
 				Window:            "Studio Plus 额度",
 				RemainingFraction: plusRemaining,
@@ -242,7 +252,7 @@ func (p *Plugin) handleQuotaFetch(raw []byte) (any, error) {
 
 		if planStatus != nil && planStatus.Subscription != nil && planStatus.Subscription.ExpiredAt != "" {
 			if sec, err := strconv.ParseInt(planStatus.Subscription.ExpiredAt, 10, 64); err == nil && sec > 0 {
-				expStr := time.Unix(sec, 0).Format("2006-01-02")
+				expStr := time.Unix(sec, 0).Format("2006-01-02 15:04")
 				resp.Summary = append(resp.Summary, pluginapi.QuotaMetric{
 					Key:    "plan_expiry",
 					Label:  "Plus 有效期至 " + expStr,
