@@ -3,6 +3,7 @@ package translator
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +23,8 @@ type StreamTranslator struct {
 	bufferText   bool
 	hasToolCalls bool
 	tools        []any
+	toolBuffers  map[int]*strings.Builder
+	toolNames    map[int]string
 }
 
 func NewStreamTranslator(model string) *StreamTranslator {
@@ -126,9 +129,13 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 		var data stepstudio.ToolCallStartData
 		_ = json.Unmarshal(ev.Data, &data)
 		t.hasToolCalls = true
+		t.ensureToolBuffers()
 		if r := t.RoleChunk(); r != nil {
 			out = append(out, r)
 		}
+		t.toolBuffers[data.BlockIndex] = &strings.Builder{}
+		t.toolBuffers[data.BlockIndex].WriteString(data.ArgumentsJSON)
+		t.toolNames[data.BlockIndex] = data.ToolName
 		frame := t.makeDeltaChunk(map[string]any{
 			"tool_calls": []map[string]any{
 				{
@@ -137,7 +144,7 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 					"type":  "function",
 					"function": map[string]any{
 						"name":      data.ToolName,
-						"arguments": data.ArgumentsJSON,
+						"arguments": "",
 					},
 				},
 			},
@@ -147,21 +154,22 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	case stepstudio.EventToolCallDelta:
 		var data stepstudio.ToolCallDeltaData
 		_ = json.Unmarshal(ev.Data, &data)
+		t.ensureToolBuffers()
+		if _, ok := t.toolBuffers[data.BlockIndex]; !ok {
+			t.toolBuffers[data.BlockIndex] = &strings.Builder{}
+		}
 		text := data.Delta
 		if text == "" {
 			text = data.ProgressText
 		}
-		frame := t.makeDeltaChunk(map[string]any{
-			"tool_calls": []map[string]any{
-				{
-					"index": data.BlockIndex,
-					"function": map[string]any{
-						"arguments": text,
-					},
-				},
-			},
-		}, nil, nil)
-		out = append(out, frame)
+		t.toolBuffers[data.BlockIndex].WriteString(text)
+
+	case stepstudio.EventContentBlockStop:
+		var data struct {
+			BlockIndex int `json:"block_index"`
+		}
+		_ = json.Unmarshal(ev.Data, &data)
+		out = append(out, t.flushToolBuffer(data.BlockIndex)...)
 
 	case stepstudio.EventMessageDelta:
 		var data stepstudio.MessageDeltaData
@@ -226,6 +234,7 @@ func (t *StreamTranslator) FinalChunks(reason string, usage map[string]any) [][]
 		return nil
 	}
 	var out [][]byte
+	out = append(out, t.flushAllToolBuffers()...)
 	if !t.textStreamed && t.textBuffer.Len() > 0 {
 		text := t.textBuffer.String()
 		t.textBuffer.Reset()
@@ -241,6 +250,51 @@ func (t *StreamTranslator) FinalChunks(reason string, usage map[string]any) [][]
 		}
 	}
 	out = append(out, t.finishFrame(reason, usage)...)
+	return out
+}
+
+func (t *StreamTranslator) ensureToolBuffers() {
+	if t.toolBuffers == nil {
+		t.toolBuffers = map[int]*strings.Builder{}
+		t.toolNames = map[int]string{}
+	}
+}
+
+func (t *StreamTranslator) flushToolBuffer(index int) [][]byte {
+	buffer, ok := t.toolBuffers[index]
+	if !ok {
+		return nil
+	}
+	delete(t.toolBuffers, index)
+	arguments := NormalizeToolArguments(t.toolNames[index], buffer.String(), t.tools)
+	if strings.TrimSpace(arguments) == "" {
+		arguments = "{}"
+	}
+	return [][]byte{t.makeDeltaChunk(map[string]any{
+		"tool_calls": []map[string]any{
+			{
+				"index": index,
+				"function": map[string]any{
+					"arguments": arguments,
+				},
+			},
+		},
+	}, nil, nil)}
+}
+
+func (t *StreamTranslator) flushAllToolBuffers() [][]byte {
+	if len(t.toolBuffers) == 0 {
+		return nil
+	}
+	indexes := make([]int, 0, len(t.toolBuffers))
+	for index := range t.toolBuffers {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	var out [][]byte
+	for _, index := range indexes {
+		out = append(out, t.flushToolBuffer(index)...)
+	}
 	return out
 }
 

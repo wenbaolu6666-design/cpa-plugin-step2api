@@ -1,6 +1,7 @@
 package translator
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -34,6 +35,51 @@ func TestStreamTranslatorConvertsTextJSONToToolCall(t *testing.T) {
 	}
 	if finish := string(chunks[1]); !strings.Contains(finish, `"finish_reason":"tool_calls"`) {
 		t.Errorf("unexpected finish frame: %s", finish)
+	}
+}
+
+func TestStreamTranslatorNormalizesNativeToolArguments(t *testing.T) {
+	tools := []any{map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name": "update_plan",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"plan": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"status": map[string]any{"type": "string"},
+								"step":   map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}}
+	tr := NewStreamTranslator("step-5-preview")
+	tr.SetTools(tools)
+
+	start, _ := json.Marshal(map[string]any{
+		"block_index": 0, "tool_call_id": "call_1", "tool_name": "update_plan", "arguments_json": "",
+	})
+	delta, _ := json.Marshal(map[string]any{
+		"block_index": 0, "progress_text": `{"plan":"[{\"status\":\"in_progress\",\"step\":\"读取文件\"}]"}`,
+	})
+	stop, _ := json.Marshal(map[string]any{"block_index": 0})
+
+	tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallStart, Data: start})
+	tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallDelta, Data: delta})
+	chunks := tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventContentBlockStop, Data: stop})
+	if len(chunks) != 1 {
+		t.Fatalf("expected one normalized tool chunk, got %d", len(chunks))
+	}
+	frame := string(chunks[0])
+	if !strings.Contains(frame, `\"plan\":[{\"status\":\"in_progress\"`) {
+		t.Fatalf("array argument was not normalized: %s", frame)
 	}
 }
 
