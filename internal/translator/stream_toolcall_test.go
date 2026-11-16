@@ -83,6 +83,31 @@ func TestStreamTranslatorNormalizesNativeToolArguments(t *testing.T) {
 	}
 }
 
+func TestStreamTranslatorDropsPreToolUnavailableText(t *testing.T) {
+	tr := NewStreamTranslator("step-5-preview")
+	chunks := tr.TranslateEvent(stepstudio.StudioEvent{
+		Type: stepstudio.EventTextDelta,
+		Data: []byte(`{"delta":"` + "`exec_command` 这次调用不可用" + `"}`),
+	})
+	if len(chunks) != 0 {
+		t.Fatalf("pre-tool unavailable text must be buffered: %q", chunks)
+	}
+
+	start, _ := json.Marshal(map[string]any{
+		"block_index": 0, "tool_call_id": "call_1", "tool_name": "exec_command", "arguments_json": "",
+	})
+	delta, _ := json.Marshal(map[string]any{"block_index": 0, "progress_text": `{"cmd":"pwd"}`})
+	stop, _ := json.Marshal(map[string]any{"block_index": 0})
+	chunks = tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallStart, Data: start})
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallDelta, Data: delta})...)
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventContentBlockStop, Data: stop})...)
+	for _, chunk := range chunks {
+		if strings.Contains(string(chunk), "不可用") {
+			t.Fatalf("pre-tool unavailable text leaked: %s", chunk)
+		}
+	}
+}
+
 func TestStreamTranslatorStillStreamsNormalText(t *testing.T) {
 	tr := NewStreamTranslator("step-5-preview")
 	chunks := tr.TranslateEvent(stepstudio.StudioEvent{

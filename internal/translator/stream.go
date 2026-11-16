@@ -116,7 +116,7 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 		if probe == "" {
 			break
 		}
-		if strings.HasPrefix(probe, "{") || strings.HasPrefix(probe, "```") {
+		if shouldBufferText(probe) {
 			t.bufferText = true
 			break
 		}
@@ -129,6 +129,8 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 		var data stepstudio.ToolCallStartData
 		_ = json.Unmarshal(ev.Data, &data)
 		t.hasToolCalls = true
+		t.textBuffer.Reset()
+		t.bufferText = false
 		t.ensureToolBuffers()
 		if r := t.RoleChunk(); r != nil {
 			out = append(out, r)
@@ -191,6 +193,21 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	}
 
 	return out
+}
+
+func shouldBufferText(text string) bool {
+	if text == "" {
+		return false
+	}
+	if strings.HasPrefix(text, "{") || strings.HasPrefix(text, "```") || strings.HasPrefix(text, "`") {
+		return true
+	}
+	for _, prefix := range []string{"exec_command", "update_plan", "write_stdin", "apply_patch", "工具", "tool", "Tool"} {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func usageMapFrom(usage *stepstudio.UsageInfo) map[string]any {
