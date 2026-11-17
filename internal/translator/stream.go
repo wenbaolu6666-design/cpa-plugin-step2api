@@ -149,7 +149,18 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 		if probe == "" {
 			break
 		}
-		if shouldBufferText(probe) {
+		if t.bufferText {
+			if shouldBufferText(probe) || couldBeToolPrefix(probe) {
+				break
+			}
+			t.bufferText = false
+			t.textStreamed = true
+			buffered := t.textBuffer.String()
+			t.textBuffer.Reset()
+			out = append(out, t.makeDeltaChunk(map[string]any{"content": buffered}, nil, nil))
+			break
+		}
+		if shouldBufferText(probe) || couldBeToolPrefix(probe) {
 			t.bufferText = true
 			break
 		}
@@ -161,7 +172,7 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	case stepstudio.EventToolCallStart:
 		var data stepstudio.ToolCallStartData
 		_ = json.Unmarshal(ev.Data, &data)
-		if len(t.tools) > 0 && !t.hasTool(data.ToolName) {
+		if !t.hasTool(data.ToolName) {
 			if t.suppressed == nil {
 				t.suppressed = map[int]string{}
 			}
@@ -243,6 +254,15 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	return out
 }
 
+func couldBeToolPrefix(text string) bool {
+	for _, name := range []string{"exec_command", "update_plan", "write_stdin", "apply_patch", "view_image", "工具", "tool", "Tool"} {
+		if strings.HasPrefix(name, text) || strings.HasPrefix(text, name) {
+			return true
+		}
+	}
+	return false
+}
+
 func shouldBufferText(text string) bool {
 	if text == "" {
 		return false
@@ -303,7 +323,7 @@ func (t *StreamTranslator) FinalChunks(reason string, usage map[string]any) [][]
 	if !t.textStreamed && t.textBuffer.Len() > 0 {
 		text := t.textBuffer.String()
 		t.textBuffer.Reset()
-		if call, ok := ParseToolCallTextWithTools(text, t.tools); ok && (len(t.tools) == 0 || t.hasTool(call.Name)) {
+		if call, ok := ParseToolCallTextWithTools(text, t.tools); ok && t.hasTool(call.Name) {
 			t.hasToolCalls = true
 			toolCall := OpenAIToolCall(call.Name, call.Arguments)
 			toolCall["index"] = 0
