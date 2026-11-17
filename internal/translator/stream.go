@@ -25,6 +25,8 @@ type StreamTranslator struct {
 	tools        []any
 	toolBuffers  map[int]*strings.Builder
 	toolNames    map[int]string
+	suppressed   map[int]string
+	dropped      []string
 }
 
 func NewStreamTranslator(model string) *StreamTranslator {
@@ -39,6 +41,32 @@ func NewStreamTranslator(model string) *StreamTranslator {
 // values before they are sent to the client.
 func (t *StreamTranslator) SetTools(tools []any) {
 	t.tools = tools
+}
+
+// hasTool reports whether the client declared the named tool. Studio's own
+// agent may call tools that exist only inside the Studio product
+// (document_parser, python, todo, file_write); forwarding those to a client
+// that never declared them makes the client reject the call.
+func (t *StreamTranslator) hasTool(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, item := range t.tools {
+		tool, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if fn, ok := tool["function"].(map[string]any); ok {
+			if got, _ := fn["name"].(string); strings.EqualFold(strings.TrimSpace(got), name) {
+				return true
+			}
+		}
+		if got, _ := tool["name"].(string); strings.EqualFold(strings.TrimSpace(got), name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *StreamTranslator) RoleChunk() []byte {
@@ -128,6 +156,14 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	case stepstudio.EventToolCallStart:
 		var data stepstudio.ToolCallStartData
 		_ = json.Unmarshal(ev.Data, &data)
+		if !t.hasTool(data.ToolName) {
+			if t.suppressed == nil {
+				t.suppressed = map[int]string{}
+			}
+			t.suppressed[data.BlockIndex] = data.ToolName
+			t.dropped = append(t.dropped, data.ToolName)
+			break
+		}
 		t.hasToolCalls = true
 		t.textBuffer.Reset()
 		t.bufferText = false
@@ -156,6 +192,9 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	case stepstudio.EventToolCallDelta:
 		var data stepstudio.ToolCallDeltaData
 		_ = json.Unmarshal(ev.Data, &data)
+		if _, ok := t.suppressed[data.BlockIndex]; ok {
+			break
+		}
 		t.ensureToolBuffers()
 		if _, ok := t.toolBuffers[data.BlockIndex]; !ok {
 			t.toolBuffers[data.BlockIndex] = &strings.Builder{}
@@ -171,6 +210,10 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 			BlockIndex int `json:"block_index"`
 		}
 		_ = json.Unmarshal(ev.Data, &data)
+		if _, ok := t.suppressed[data.BlockIndex]; ok {
+			delete(t.suppressed, data.BlockIndex)
+			break
+		}
 		out = append(out, t.flushToolBuffer(data.BlockIndex)...)
 
 	case stepstudio.EventMessageDelta:
@@ -255,7 +298,7 @@ func (t *StreamTranslator) FinalChunks(reason string, usage map[string]any) [][]
 	if !t.textStreamed && t.textBuffer.Len() > 0 {
 		text := t.textBuffer.String()
 		t.textBuffer.Reset()
-		if call, ok := ParseToolCallTextWithTools(text, t.tools); ok {
+		if call, ok := ParseToolCallTextWithTools(text, t.tools); ok && t.hasTool(call.Name) {
 			t.hasToolCalls = true
 			toolCall := OpenAIToolCall(call.Name, call.Arguments)
 			toolCall["index"] = 0
@@ -265,6 +308,19 @@ func (t *StreamTranslator) FinalChunks(reason string, usage map[string]any) [][]
 		} else {
 			out = append(out, t.makeDeltaChunk(map[string]any{"content": text}, nil, nil))
 		}
+	}
+	if len(t.dropped) > 0 && !t.hasToolCalls && !t.textStreamed && t.textBuffer.Len() == 0 {
+		seen := map[string]bool{}
+		var names []string
+		for _, name := range t.dropped {
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			names = append(names, name)
+		}
+		notice := fmt.Sprintf("（上游尝试调用内置工具 %s，本环境没有这些工具，该调用已忽略。请重试，或改用其他模型。）", strings.Join(names, ", "))
+		out = append(out, t.makeDeltaChunk(map[string]any{"content": notice}, nil, nil))
 	}
 	out = append(out, t.finishFrame(reason, usage)...)
 	return out
