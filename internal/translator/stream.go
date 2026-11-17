@@ -48,11 +48,16 @@ func (t *StreamTranslator) SetTools(tools []any) {
 // (document_parser, python, todo, file_write); forwarding those to a client
 // that never declared them makes the client reject the call.
 func (t *StreamTranslator) hasTool(name string) bool {
+	return ToolDeclared(t.tools, name)
+}
+
+// ToolDeclared reports whether a client-facing tool list contains the name.
+func ToolDeclared(tools []any, name string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return false
 	}
-	for _, item := range t.tools {
+	for _, item := range tools {
 		tool, ok := item.(map[string]any)
 		if !ok {
 			continue
