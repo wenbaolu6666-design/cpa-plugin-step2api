@@ -320,16 +320,16 @@ func (p *Plugin) saveTokenToDisk(fpath, token, webID string) {
 	if err != nil {
 		return
 	}
-	var payload AuthFilePayload
-	if err := json.Unmarshal(data, &payload); err != nil {
+	var rawMap map[string]any
+	if err := json.Unmarshal(data, &rawMap); err != nil || rawMap == nil {
 		return
 	}
-	payload.OasisToken = token
+	rawMap["oasis_token"] = token
 	if webID != "" {
-		payload.WebID = webID
+		rawMap["web_id"] = webID
 	}
-	payload.UpdatedAt = time.Now().Format(time.RFC3339)
-	if updated, errM := json.MarshalIndent(payload, "", "  "); errM == nil {
+	rawMap["updated_at"] = time.Now().Format(time.RFC3339)
+	if updated, errM := json.MarshalIndent(rawMap, "", "  "); errM == nil {
 		_ = os.WriteFile(fpath, updated, 0644)
 	}
 }
