@@ -255,10 +255,10 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	if err != nil && isInvalidBodyError(err) {
 		dumpInvalidBodyDebug(req.Model, req.Payload, chatReq)
 		retryReq := chatReq
-		retryReq.SystemPrompt = ""
 		retryReq.EnableWebSearch = false
 		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
 		if err != nil && isInvalidBodyError(err) {
+			retryReq.SystemPrompt = ""
 			retryReq.Content = truncateTail(chatReq.Content, 30000)
 			eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
 		}
@@ -370,10 +370,10 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	if err != nil && isInvalidBodyError(err) {
 		dumpInvalidBodyDebug(req.Model, req.Payload, chatReq)
 		retryReq := chatReq
-		retryReq.SystemPrompt = ""
 		retryReq.EnableWebSearch = false
 		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
 		if err != nil && isInvalidBodyError(err) {
+			retryReq.SystemPrompt = ""
 			retryReq.Content = truncateTail(chatReq.Content, 30000)
 			eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
 		}
