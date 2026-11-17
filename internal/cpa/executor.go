@@ -23,6 +23,13 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	// Studio rejects TurnStreamBody payloads above 1 MiB (1,048,576 bytes) with
+	// HTTP 400 "invalid request body". Keep a comfortable margin below 1 MiB.
+	maxStudioRequestBodyBytes = 920 * 1024
+	maxBaseSystemPromptBytes  = 220 * 1024
+)
+
 func dumpInvalidBodyDebug(model string, payloadBytes []byte, chatReq stepstudio.PlaygroundChatRequest) {
 	type dump struct {
 		Model      string `json:"model"`
@@ -33,7 +40,7 @@ func dumpInvalidBodyDebug(model string, payloadBytes []byte, chatReq stepstudio.
 	}
 	payload := string(payloadBytes)
 	if len(payload) > 200000 {
-		payload = payload[:200000]
+		payload = translator.TruncateUTF8Head(payload, 200000)
 	}
 	out := dump{
 		Model:      model,
@@ -49,19 +56,117 @@ func dumpInvalidBodyDebug(model string, payloadBytes []byte, chatReq stepstudio.
 	_ = os.WriteFile(filepath.Join(os.TempDir(), "step2api-invalid-body.json"), raw, 0o644)
 }
 
-func truncateTail(value string, limit int) string {
-	if limit <= 0 || len(value) <= limit {
-		return value
-	}
-	return value[len(value)-limit:]
-}
-
 func isInvalidBodyError(err error) bool {
 	apiErr, ok := err.(*stepstudio.APIError)
 	if !ok || apiErr == nil {
 		return false
 	}
-	return apiErr.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(apiErr.Message), "invalid request body")
+	msg := strings.ToLower(apiErr.Message)
+	return apiErr.StatusCode == http.StatusBadRequest &&
+		(strings.Contains(msg, "invalid request body") || strings.Contains(msg, "invalid json body"))
+}
+
+// fitPlaygroundChatRequest ensures the marshaled Studio request stays within
+// maxBodyBytes on valid UTF-8 boundaries while NEVER discarding toolProtocol.
+func fitPlaygroundChatRequest(
+	convID string,
+	chatReq stepstudio.PlaygroundChatRequest,
+	baseSystem string,
+	toolProtocol string,
+	maxBodyBytes int,
+) stepstudio.PlaygroundChatRequest {
+	if maxBodyBytes <= 0 {
+		maxBodyBytes = maxStudioRequestBodyBytes
+	}
+
+	buildSystem := func(sysBase string) string {
+		sysBase = strings.TrimSpace(sysBase)
+		if toolProtocol == "" {
+			return sysBase
+		}
+		if sysBase == "" {
+			return toolProtocol
+		}
+		return sysBase + "\n\n" + toolProtocol
+	}
+
+	curBase := baseSystem
+	if len(curBase) > maxBaseSystemPromptBytes {
+		curBase = translator.TruncateUTF8HeadTail(curBase, maxBaseSystemPromptBytes)
+	}
+	if toolProtocol != "" || baseSystem != "" {
+		chatReq.SystemPrompt = buildSystem(curBase)
+	}
+
+	// Fast path when unescaped length cannot possibly exceed maxBodyBytes even
+	// under worst-case JSON string escaping.
+	if len(chatReq.Content)*2+len(chatReq.SystemPrompt)*2+4096 <= maxBodyBytes {
+		return chatReq
+	}
+
+	marshaledLen := func(candidate stepstudio.PlaygroundChatRequest) int {
+		body, err := json.Marshal(stepstudio.TurnStreamBody{
+			ConversationID: convID,
+			Kind:           "chat",
+			Chat:           candidate,
+		})
+		if err != nil {
+			return maxBodyBytes + 1
+		}
+		return len(body)
+	}
+
+	curLen := marshaledLen(chatReq)
+	if curLen <= maxBodyBytes {
+		return chatReq
+	}
+
+	// If SystemPrompt alone consumes more than half of maxBodyBytes, shrink only
+	// curBase while keeping toolProtocol 100% intact.
+	sysOnly := chatReq
+	sysOnly.Content = "…"
+	if marshaledLen(sysOnly) > maxBodyBytes/2 && curBase != "" {
+		targetBase := maxBodyBytes / 4
+		if targetBase < 4096 {
+			targetBase = 0
+		}
+		if targetBase == 0 {
+			curBase = ""
+		} else {
+			curBase = translator.TruncateUTF8HeadTail(curBase, targetBase)
+		}
+		chatReq.SystemPrompt = buildSystem(curBase)
+	}
+
+	origContent := chatReq.Content
+	sysOverhead := marshaledLen(stepstudio.PlaygroundChatRequest{
+		Model:           chatReq.Model,
+		Content:         "",
+		SystemPrompt:    chatReq.SystemPrompt,
+		AssetIDs:        chatReq.AssetIDs,
+		EnableWebSearch: chatReq.EnableWebSearch,
+	})
+	contentBudget := maxBodyBytes - sysOverhead - 2048
+	if contentBudget < 2048 {
+		contentBudget = 2048
+	}
+
+	for attempt := 0; attempt < 8; attempt++ {
+		chatReq.Content = translator.TruncateUTF8HeadTail(origContent, contentBudget)
+		if strings.TrimSpace(chatReq.Content) == "" {
+			chatReq.Content = "…"
+		}
+		curLen = marshaledLen(chatReq)
+		if curLen <= maxBodyBytes {
+			return chatReq
+		}
+		contentBudget = contentBudget * 70 / 100
+		if contentBudget < 1024 {
+			chatReq.Content = translator.TruncateUTF8Tail(origContent, 1024)
+			break
+		}
+	}
+	return chatReq
 }
 
 func clampExtractedForStudio(cleanModel string, extracted *translator.ExtractedRequest) {
@@ -69,8 +174,32 @@ func clampExtractedForStudio(cleanModel string, extracted *translator.ExtractedR
 		return
 	}
 	limit := 64000
-	if info, ok := stepstudio.GetModelInfo(cleanModel); ok && info.MaxTokens > 0 {
-		limit = info.MaxTokens
+	if info, ok := stepstudio.GetModelInfo(cleanModel); ok {
+		if info.MaxTokens > 0 {
+			limit = info.MaxTokens
+		}
+		if !info.SupportsThinking {
+			extracted.Thinking = false
+			extracted.Effort = ""
+		} else if extracted.Thinking && len(info.AllowedEfforts) > 0 {
+			allowed := false
+			for _, candidate := range info.AllowedEfforts {
+				if strings.EqualFold(candidate, extracted.Effort) {
+					extracted.Effort = candidate
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				if strings.EqualFold(extracted.Effort, "xhigh") {
+					extracted.Effort = info.AllowedEfforts[len(info.AllowedEfforts)-1]
+				} else if info.DefaultEffort != "" {
+					extracted.Effort = info.DefaultEffort
+				} else {
+					extracted.Effort = info.AllowedEfforts[0]
+				}
+			}
+		}
 	}
 	if extracted.MaxTokens <= 0 || extracted.MaxTokens > limit {
 		extracted.MaxTokens = limit
@@ -199,6 +328,35 @@ func uploadTurnImages(ctx context.Context, client *stepstudio.Client, refs []tra
 	return assetIDs, nil
 }
 
+func startPlaygroundWithFallback(
+	ctx context.Context,
+	client *stepstudio.Client,
+	convID string,
+	rawModel string,
+	rawPayload []byte,
+	baseReq stepstudio.PlaygroundChatRequest,
+	extracted *translator.ExtractedRequest,
+) (<-chan stepstudio.StudioEvent, <-chan error, error) {
+	fitted := fitPlaygroundChatRequest(convID, baseReq, extracted.BaseSystem, extracted.ToolProtocol, maxStudioRequestBodyBytes)
+	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, fitted)
+	if err != nil && isInvalidBodyError(err) {
+		dumpInvalidBodyDebug(rawModel, rawPayload, fitted)
+		retryReq := baseReq
+		retryReq.EnableWebSearch = false
+		retryReq = fitPlaygroundChatRequest(convID, retryReq, extracted.BaseSystem, extracted.ToolProtocol, 450*1024)
+		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
+		if err != nil && isInvalidBodyError(err) {
+			// Keep ToolProtocol intact even on final fallback so the model never
+			// loses declared client tools or reverts to Studio's /home/jovyan prompt.
+			retryReq2 := baseReq
+			retryReq2.EnableWebSearch = false
+			retryReq2 = fitPlaygroundChatRequest(convID, retryReq2, "", extracted.ToolProtocol, 150*1024)
+			eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq2)
+		}
+	}
+	return eventsCh, errCh, err
+}
+
 func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	var req rpcExecutorRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
@@ -251,18 +409,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		EnableWebSearch: extracted.EnableWebSearch,
 	}
 
-	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
-	if err != nil && isInvalidBodyError(err) {
-		dumpInvalidBodyDebug(req.Model, req.Payload, chatReq)
-		retryReq := chatReq
-		retryReq.EnableWebSearch = false
-		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
-		if err != nil && isInvalidBodyError(err) {
-			retryReq.SystemPrompt = ""
-			retryReq.Content = truncateTail(chatReq.Content, 30000)
-			eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
-		}
-	}
+	eventsCh, errCh, err := startPlaygroundWithFallback(ctx, client, convID, req.Model, req.Payload, chatReq, extracted)
 	if err != nil {
 		cancel()
 		p.noteStudioUpstreamFailure(cleanModel, err)
@@ -286,6 +433,11 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 			chunks := trans.TranslateEvent(ev)
 			for _, chunk := range chunks {
 				_ = p.emitStreamChunk(streamID, chunk)
+			}
+			if trans.Done() {
+				cancel()
+				_ = p.closeStream(streamID, nil)
+				return
 			}
 		}
 		if sErr := <-errCh; sErr != nil {
@@ -366,18 +518,7 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		EnableWebSearch: extracted.EnableWebSearch,
 	}
 
-	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, chatReq)
-	if err != nil && isInvalidBodyError(err) {
-		dumpInvalidBodyDebug(req.Model, req.Payload, chatReq)
-		retryReq := chatReq
-		retryReq.EnableWebSearch = false
-		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
-		if err != nil && isInvalidBodyError(err) {
-			retryReq.SystemPrompt = ""
-			retryReq.Content = truncateTail(chatReq.Content, 30000)
-			eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
-		}
-	}
+	eventsCh, errCh, err := startPlaygroundWithFallback(ctx, client, convID, req.Model, req.Payload, chatReq, extracted)
 	if err != nil {
 		p.noteStudioUpstreamFailure(cleanModel, err)
 		if pErr := pluginErrorFromUpstreamErr(err); pErr != nil {
@@ -396,15 +537,43 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	}
 	var nativeToolCalls []nativeToolCall
 	nativeToolIndex := map[int]int{}
+	activeToolBlocks := map[int]bool{}
+	suppressedBlocks := map[int]bool{}
+	var droppedTools []string
+	completedDeclaredTools := 0
+	stoppedEarly := false
 
+eventLoop:
 	for ev := range eventsCh {
 		switch ev.Type {
+		case stepstudio.EventContentBlockStart:
+			var d stepstudio.ContentBlockStartData
+			_ = json.Unmarshal(ev.Data, &d)
+			if d.BlockType == "CONTENT_BLOCK_TYPE_TOOL_CALL" {
+				activeToolBlocks[d.BlockIndex] = true
+				break
+			}
+			if completedDeclaredTools > 0 && len(activeToolBlocks) == 0 {
+				stoppedEarly = true
+				cancel()
+				break eventLoop
+			}
 		case stepstudio.EventTextDelta:
+			if completedDeclaredTools > 0 && len(activeToolBlocks) == 0 {
+				stoppedEarly = true
+				cancel()
+				break eventLoop
+			}
 			var d stepstudio.DeltaData
 			if err := json.Unmarshal(ev.Data, &d); err == nil {
 				contentBuilder.WriteString(d.Delta)
 			}
 		case stepstudio.EventReasoningDelta:
+			if completedDeclaredTools > 0 && len(activeToolBlocks) == 0 {
+				stoppedEarly = true
+				cancel()
+				break eventLoop
+			}
 			var d stepstudio.DeltaData
 			if err := json.Unmarshal(ev.Data, &d); err == nil {
 				reasoningBuilder.WriteString(d.Delta)
@@ -412,6 +581,13 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		case stepstudio.EventToolCallStart:
 			var d stepstudio.ToolCallStartData
 			if err := json.Unmarshal(ev.Data, &d); err == nil {
+				if d.ToolName != "" && !translator.ToolDeclared(extracted.Tools, d.ToolName) {
+					delete(activeToolBlocks, d.BlockIndex)
+					suppressedBlocks[d.BlockIndex] = true
+					droppedTools = append(droppedTools, d.ToolName)
+					break
+				}
+				activeToolBlocks[d.BlockIndex] = true
 				pos, exists := nativeToolIndex[d.BlockIndex]
 				if !exists {
 					pos = len(nativeToolCalls)
@@ -425,6 +601,9 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		case stepstudio.EventToolCallDelta:
 			var d stepstudio.ToolCallDeltaData
 			if err := json.Unmarshal(ev.Data, &d); err == nil {
+				if suppressedBlocks[d.BlockIndex] {
+					break
+				}
 				pos, exists := nativeToolIndex[d.BlockIndex]
 				if !exists {
 					pos = len(nativeToolCalls)
@@ -437,6 +616,24 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 				}
 				nativeToolCalls[pos].Args += delta
 			}
+		case stepstudio.EventContentBlockStop:
+			var d struct {
+				BlockIndex int `json:"block_index"`
+			}
+			_ = json.Unmarshal(ev.Data, &d)
+			delete(activeToolBlocks, d.BlockIndex)
+			if suppressedBlocks[d.BlockIndex] {
+				delete(suppressedBlocks, d.BlockIndex)
+				if completedDeclaredTools == 0 && len(activeToolBlocks) == 0 {
+					stoppedEarly = true
+					cancel()
+					break eventLoop
+				}
+				break
+			}
+			if _, isTool := nativeToolIndex[d.BlockIndex]; isTool {
+				completedDeclaredTools++
+			}
 		case stepstudio.EventFinal:
 			var d stepstudio.FinalData
 			if err := json.Unmarshal(ev.Data, &d); err == nil {
@@ -445,18 +642,19 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		}
 	}
 
-	if sErr := <-errCh; sErr != nil {
-		p.noteStudioUpstreamFailure(cleanModel, sErr)
-		if pErr := pluginErrorFromUpstreamErr(sErr); pErr != nil {
-			return nil, pErr
+	if !stoppedEarly {
+		if sErr := <-errCh; sErr != nil {
+			p.noteStudioUpstreamFailure(cleanModel, sErr)
+			if pErr := pluginErrorFromUpstreamErr(sErr); pErr != nil {
+				return nil, pErr
+			}
+			return nil, sErr
 		}
-		return nil, sErr
 	}
 
 	finishReason := "stop"
 	content := contentBuilder.String()
 	var toolCalls []map[string]any
-	var droppedTools []string
 	for _, call := range nativeToolCalls {
 		if call.Name != "" && !translator.ToolDeclared(extracted.Tools, call.Name) {
 			droppedTools = append(droppedTools, call.Name)
@@ -476,8 +674,21 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		toolCalls = []map[string]any{translator.OpenAIToolCall(call.Name, call.Arguments)}
 		content = ""
 	} else if len(droppedTools) > 0 {
+		seen := map[string]bool{}
+		var unique []string
+		for _, name := range droppedTools {
+			if name != "" && !seen[name] {
+				seen[name] = true
+				unique = append(unique, name)
+			}
+		}
 		finishReason = "stop"
-		content = fmt.Sprintf("（上游尝试调用内置工具 %s，本环境没有这些工具，该调用已忽略。请重试，或改用其他模型。）", strings.Join(droppedTools, ", "))
+		notice := fmt.Sprintf("（上游尝试调用内置工具 %s，本环境没有这些工具，该调用已忽略。请改用当前会话声明的工具重试。）", strings.Join(unique, ", "))
+		if strings.TrimSpace(content) != "" {
+			content = strings.TrimRight(content, "\r\n") + "\n\n" + notice
+		} else {
+			content = notice
+		}
 	}
 
 	message := map[string]any{

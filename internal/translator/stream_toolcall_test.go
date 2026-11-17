@@ -184,3 +184,144 @@ func TestStreamTranslatorDropsUnavailableTextSplitAcrossDeltas(t *testing.T) {
 		}
 	}
 }
+func TestStreamTranslatorCutsStudioPostToolServerLoopAfterPreamble(t *testing.T) {
+	declared := []any{map[string]any{
+		"type":     "function",
+		"function": map[string]any{"name": "exec_command"},
+	}}
+	tr := NewStreamTranslator("step-5-preview")
+	tr.SetTools(declared)
+
+	var chunks [][]byte
+	emit := func(evType string, payload map[string]any) {
+		raw, _ := json.Marshal(payload)
+		chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: evType, Data: raw})...)
+	}
+
+	// Block 0: reasoning
+	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 0, "block_type": "CONTENT_BLOCK_TYPE_REASONING"})
+	emit(stepstudio.EventReasoningDelta, map[string]any{"block_index": 0, "delta": "thinking step 1"})
+	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 0})
+	// Block 1: preamble text (sets textStreamed = true)
+	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 1, "block_type": "CONTENT_BLOCK_TYPE_TEXT"})
+	emit(stepstudio.EventTextDelta, map[string]any{"block_index": 1, "delta": "我先查看一下当前目录下的文件。"})
+	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 1})
+	// Block 2: declared native tool call
+	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 2, "block_type": "CONTENT_BLOCK_TYPE_TOOL_CALL", "tool_call_id": "call_abc"})
+	emit(stepstudio.EventToolCallStart, map[string]any{"block_index": 2, "tool_call_id": "call_abc", "tool_name": "exec_command", "arguments_json": ""})
+	emit(stepstudio.EventToolCallDelta, map[string]any{"block_index": 2, "progress_text": `{"cmd":"dir"}`})
+	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 2})
+
+	if tr.Done() {
+		t.Fatal("should allow potential parallel tool_call block before closing")
+	}
+
+	// Block 3: Studio server-side harness rejects exec_command and starts Step 2 reasoning
+	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 3, "block_type": "CONTENT_BLOCK_TYPE_REASONING"})
+	if !tr.Done() {
+		t.Fatal("translator must mark Done() immediately when post-tool reasoning starts")
+	}
+
+	// Subsequent Studio Step 2 error text must be completely ignored
+	emit(stepstudio.EventReasoningDelta, map[string]any{"block_index": 3, "delta": "This tool is not available"})
+	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 4, "block_type": "CONTENT_BLOCK_TYPE_TEXT"})
+	emit(stepstudio.EventTextDelta, map[string]any{"block_index": 4, "delta": "抱歉，`exec_command` 工具在当前运行环境中不可用。"})
+
+	var joined strings.Builder
+	for _, c := range chunks {
+		joined.Write(c)
+	}
+	all := joined.String()
+	if !strings.Contains(all, "我先查看一下当前目录下的文件。") {
+		t.Fatalf("expected preamble to be preserved: %s", all)
+	}
+	if !strings.Contains(all, `"index":0`) || strings.Contains(all, `"index":2`) {
+		t.Fatalf("expected sequential 0-based tool_calls index, got: %s", all)
+	}
+	if !strings.Contains(all, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("expected finish_reason=tool_calls, got: %s", all)
+	}
+	if strings.Contains(all, "不可用") || strings.Contains(all, "not available") {
+		t.Fatalf("post-tool server error leaked: %s", all)
+	}
+}
+
+func TestStreamTranslatorSupportsParallelDeclaredToolCallsWithSequentialIndices(t *testing.T) {
+	declared := []any{
+		map[string]any{"type": "function", "function": map[string]any{"name": "update_plan"}},
+		map[string]any{"type": "function", "function": map[string]any{"name": "exec_command"}},
+	}
+	tr := NewStreamTranslator("step-5-preview")
+	tr.SetTools(declared)
+
+	var chunks [][]byte
+	emit := func(evType string, payload map[string]any) {
+		raw, _ := json.Marshal(payload)
+		chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: evType, Data: raw})...)
+	}
+
+	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 2, "block_type": "CONTENT_BLOCK_TYPE_TOOL_CALL"})
+	emit(stepstudio.EventToolCallStart, map[string]any{"block_index": 2, "tool_call_id": "call_plan", "tool_name": "update_plan", "arguments_json": ""})
+	emit(stepstudio.EventToolCallDelta, map[string]any{"block_index": 2, "progress_text": `{"step":"a"}`})
+	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 2})
+
+	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 3, "block_type": "CONTENT_BLOCK_TYPE_TOOL_CALL"})
+	emit(stepstudio.EventToolCallStart, map[string]any{"block_index": 3, "tool_call_id": "call_exec", "tool_name": "exec_command", "arguments_json": ""})
+	emit(stepstudio.EventToolCallDelta, map[string]any{"block_index": 3, "progress_text": `{"cmd":"pwd"}`})
+	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 3})
+
+	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 5, "block_type": "CONTENT_BLOCK_TYPE_REASONING"})
+
+	var joined strings.Builder
+	for _, c := range chunks {
+		joined.Write(c)
+	}
+	all := joined.String()
+	if !strings.Contains(all, `"index":0`) || !strings.Contains(all, `"index":1`) {
+		t.Fatalf("expected both parallel tool calls with indices 0 and 1: %s", all)
+	}
+	if !tr.Done() {
+		t.Fatal("expected Done() after parallel tool calls finish and reasoning starts")
+	}
+}
+
+func TestStreamTranslatorAbortsImmediatelyOnUndeclaredBuiltinToolEvenAfterPreamble(t *testing.T) {
+	declared := []any{map[string]any{"type": "function", "function": map[string]any{"name": "exec_command"}}}
+	tr := NewStreamTranslator("step-5-preview")
+	tr.SetTools(declared)
+
+	var chunks [][]byte
+	emit := func(evType string, payload map[string]any) {
+		raw, _ := json.Marshal(payload)
+		chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: evType, Data: raw})...)
+	}
+
+	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 1, "block_type": "CONTENT_BLOCK_TYPE_TEXT"})
+	emit(stepstudio.EventTextDelta, map[string]any{"block_index": 1, "delta": "我先确认目录。"})
+	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 1})
+
+	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 2, "block_type": "CONTENT_BLOCK_TYPE_TOOL_CALL"})
+	emit(stepstudio.EventToolCallStart, map[string]any{"block_index": 2, "tool_call_id": "call_py", "tool_name": "python", "arguments_json": ""})
+	emit(stepstudio.EventToolCallDelta, map[string]any{"block_index": 2, "progress_text": `{"code":"import os"}`})
+	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 2})
+
+	if !tr.Done() {
+		t.Fatal("expected Done() immediately on undeclared tool ContentBlockStop before /home/jovyan runs")
+	}
+
+	// Simulate /home/jovyan post-execution message that must be ignored
+	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 4, "block_type": "CONTENT_BLOCK_TYPE_TEXT"})
+	emit(stepstudio.EventTextDelta, map[string]any{"block_index": 4, "delta": "当前处于 /home/jovyan Linux 沙箱"})
+
+	var joined strings.Builder
+	for _, c := range chunks {
+		joined.Write(c)
+	}
+	all := joined.String()
+	if !strings.Contains(all, "python") {
+		t.Fatalf("expected notice naming python even after preamble: %s", all)
+	}
+	if strings.Contains(all, "/home/jovyan") {
+		t.Fatalf("/home/jovyan output leaked: %s", all)
+	}
+}
