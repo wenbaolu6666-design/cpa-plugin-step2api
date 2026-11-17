@@ -28,6 +28,10 @@ const (
 	// HTTP 400 "invalid request body". Keep a comfortable margin below 1 MiB.
 	maxStudioRequestBodyBytes = 920 * 1024
 	maxBaseSystemPromptBytes  = 220 * 1024
+	// Draining remaining Studio events until "done" takes ~1.5s for rejected
+	// client tool calls and avoids leaking Studio's 5-slot Redis concurrency
+	// counter. Cap background drain at 20s for slow sandbox calls.
+	upstreamBackgroundDrainTimeout = 20 * time.Second
 )
 
 func dumpInvalidBodyDebug(model string, payloadBytes []byte, chatReq stepstudio.PlaygroundChatRequest) {
@@ -66,6 +70,80 @@ func isInvalidBodyError(err error) bool {
 		(strings.Contains(msg, "invalid request body") || strings.Contains(msg, "invalid json body"))
 }
 
+func isConcurrencyLimitError(err error) bool {
+	apiErr, ok := err.(*stepstudio.APIError)
+	if !ok || apiErr == nil {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Message)
+	return apiErr.StatusCode == http.StatusTooManyRequests && strings.Contains(msg, "concurrency")
+}
+
+// splitModelAndEffortSuffix separates an optional parenthesized thinking suffix
+// such as "step-5-preview(max)" into ("step-5-preview", "max").
+func splitModelAndEffortSuffix(model string) (baseModel string, effortHint string) {
+	baseModel = strings.TrimSpace(model)
+	openIdx := strings.IndexByte(baseModel, '(')
+	closeIdx := strings.LastIndexByte(baseModel, ')')
+	if openIdx > 0 && closeIdx > openIdx {
+		effortHint = strings.ToLower(strings.TrimSpace(baseModel[openIdx+1 : closeIdx]))
+		baseModel = strings.TrimSpace(baseModel[:openIdx])
+	}
+	return baseModel, effortHint
+}
+
+func applyModelEffortHint(extracted *translator.ExtractedRequest, effortHint string) {
+	if extracted == nil || effortHint == "" {
+		return
+	}
+	switch effortHint {
+	case "none", "off", "disabled":
+		extracted.Thinking = false
+		extracted.Effort = ""
+	case "minimal", "low":
+		extracted.Thinking = true
+		extracted.Effort = "low"
+	case "medium":
+		extracted.Thinking = true
+		extracted.Effort = "medium"
+	case "high":
+		extracted.Thinking = true
+		extracted.Effort = "high"
+	case "xhigh", "ultra", "max":
+		extracted.Thinking = true
+		extracted.Effort = "xhigh"
+	}
+}
+
+// drainStudioStreamQuietly consumes remaining Studio SSE events in the
+// background until the channel closes (on EventDone) or timeout elapses, then
+// cancels ctx. Aborting the TCP connection before EventDone causes Studio's
+// server to hold the Redis concurrency slot for minutes.
+func drainStudioStreamQuietly(
+	eventsCh <-chan stepstudio.StudioEvent,
+	errCh <-chan error,
+	cancel context.CancelFunc,
+	maxWait time.Duration,
+) {
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
+	defer cancel()
+	for {
+		select {
+		case _, ok := <-eventsCh:
+			if !ok {
+				select {
+				case <-errCh:
+				default:
+				}
+				return
+			}
+		case <-timer.C:
+			return
+		}
+	}
+}
+
 // fitPlaygroundChatRequest ensures the marshaled Studio request stays within
 // maxBodyBytes on valid UTF-8 boundaries while NEVER discarding toolProtocol.
 func fitPlaygroundChatRequest(
@@ -98,8 +176,6 @@ func fitPlaygroundChatRequest(
 		chatReq.SystemPrompt = buildSystem(curBase)
 	}
 
-	// Fast path when unescaped length cannot possibly exceed maxBodyBytes even
-	// under worst-case JSON string escaping.
 	if len(chatReq.Content)*2+len(chatReq.SystemPrompt)*2+4096 <= maxBodyBytes {
 		return chatReq
 	}
@@ -121,8 +197,6 @@ func fitPlaygroundChatRequest(
 		return chatReq
 	}
 
-	// If SystemPrompt alone consumes more than half of maxBodyBytes, shrink only
-	// curBase while keeping toolProtocol 100% intact.
 	sysOnly := chatReq
 	sysOnly.Content = "…"
 	if marshaledLen(sysOnly) > maxBodyBytes/2 && curBase != "" {
@@ -228,8 +302,15 @@ func pluginErrorFromUpstreamErr(err error) *pluginabi.Error {
 	if status == 0 {
 		status = http.StatusBadGateway
 	}
+	if isConcurrencyLimitError(err) {
+		// Return 503 without quota keywords so CPA Core does not place the
+		// Studio credential into a long quota cooldown on transient burst traffic.
+		busyErr := pluginabi.NewError("upstream_busy", "StepFun Studio 并发通道繁忙 ("+apiErr.Message+")，请稍后重试", http.StatusServiceUnavailable)
+		busyErr.Retryable = true
+		return busyErr
+	}
 	if status == http.StatusTooManyRequests {
-		return pluginabi.NewError("upstream_rate_limited", "StepFun 上游限流/额度不足: "+apiErr.Message, http.StatusTooManyRequests)
+		return pluginabi.NewError("upstream_rate_limited", "StepFun 上游限流: "+apiErr.Message, http.StatusTooManyRequests)
 	}
 	return pluginabi.NewError("upstream_error", "StepFun 上游返回 http "+strconv.Itoa(status)+": "+apiErr.Message, status)
 }
@@ -253,8 +334,12 @@ func (p *Plugin) handleExecutorIdentifier() (any, error) {
 	}, nil
 }
 
-func (p *Plugin) extractCredentials(storageJSON []byte, metadata map[string]any) (token, webID string) {
+func (p *Plugin) extractCredentialsWithSource(storageJSON []byte, metadata map[string]any) (token, webID, authFile string) {
+	var accID string
 	if len(metadata) > 0 {
+		if id, ok := metadata["account_id"].(string); ok {
+			accID = strings.TrimSpace(id)
+		}
 		if tok, ok := metadata["oasis_token"].(string); ok && strings.TrimSpace(tok) != "" {
 			token = strings.TrimSpace(tok)
 		}
@@ -265,6 +350,9 @@ func (p *Plugin) extractCredentials(storageJSON []byte, metadata map[string]any)
 	if len(storageJSON) > 0 {
 		var payload AuthFilePayload
 		if err := json.Unmarshal(storageJSON, &payload); err == nil {
+			if accID == "" && payload.AccountID != "" {
+				accID = strings.TrimSpace(payload.AccountID)
+			}
 			if token == "" && payload.OasisToken != "" {
 				token = strings.TrimSpace(payload.OasisToken)
 			}
@@ -273,20 +361,26 @@ func (p *Plugin) extractCredentials(storageJSON []byte, metadata map[string]any)
 			}
 		}
 	}
-	if token == "" || webID == "" {
-		oauthDir := resolveOAuthDir()
-		if files, err := filepath.Glob(filepath.Join(oauthDir, "step2api-*.json")); err == nil && len(files) > 0 {
-			for _, f := range files {
-				if data, err := os.ReadFile(f); err == nil {
-					var item AuthFilePayload
-					if err := json.Unmarshal(data, &item); err == nil {
-						if token == "" && item.OasisToken != "" {
-							token = item.OasisToken
-						}
-						if webID == "" && item.WebID != "" {
-							webID = item.WebID
-						}
-					}
+	oauthDir := resolveOAuthDir()
+	if files, err := filepath.Glob(filepath.Join(oauthDir, "step2api-*.json")); err == nil && len(files) > 0 {
+		for _, f := range files {
+			data, errRead := os.ReadFile(f)
+			if errRead != nil {
+				continue
+			}
+			var item AuthFilePayload
+			if json.Unmarshal(data, &item) != nil {
+				continue
+			}
+			if (accID != "" && item.AccountID == accID) || (webID != "" && item.WebID == webID) || authFile == "" {
+				if authFile == "" || (accID != "" && item.AccountID == accID) {
+					authFile = f
+				}
+				if token == "" && item.OasisToken != "" {
+					token = strings.TrimSpace(item.OasisToken)
+				}
+				if webID == "" && item.WebID != "" {
+					webID = strings.TrimSpace(item.WebID)
 				}
 			}
 		}
@@ -294,6 +388,45 @@ func (p *Plugin) extractCredentials(storageJSON []byte, metadata map[string]any)
 	if webID == "" && token != "" {
 		webID = stepstudio.ExtractDeviceID(token)
 	}
+	cacheKey := webID
+	if cacheKey == "" {
+		cacheKey = authFile
+	}
+	if cacheKey != "" {
+		p.tokenCacheMu.RLock()
+		cached := p.tokenCache[cacheKey]
+		p.tokenCacheMu.RUnlock()
+		if cached != "" {
+			token = cached
+		}
+	}
+	return token, webID, authFile
+}
+
+func (p *Plugin) rememberFreshToken(prevToken, newToken, webID, authFile string) {
+	newToken = strings.TrimSpace(newToken)
+	if newToken == "" || newToken == prevToken {
+		return
+	}
+	cacheKey := webID
+	if cacheKey == "" {
+		cacheKey = authFile
+	}
+	if cacheKey != "" {
+		p.tokenCacheMu.Lock()
+		if p.tokenCache == nil {
+			p.tokenCache = make(map[string]string)
+		}
+		p.tokenCache[cacheKey] = newToken
+		p.tokenCacheMu.Unlock()
+	}
+	if authFile != "" {
+		p.saveTokenToDisk(authFile, newToken, webID)
+	}
+}
+
+func (p *Plugin) extractCredentials(storageJSON []byte, metadata map[string]any) (token, webID string) {
+	token, webID, _ = p.extractCredentialsWithSource(storageJSON, metadata)
 	return token, webID
 }
 
@@ -328,6 +461,27 @@ func uploadTurnImages(ctx context.Context, client *stepstudio.Client, refs []tra
 	return assetIDs, nil
 }
 
+func streamWithConcurrencyRetry(
+	ctx context.Context,
+	client *stepstudio.Client,
+	convID string,
+	req stepstudio.PlaygroundChatRequest,
+) (<-chan stepstudio.StudioEvent, <-chan error, error) {
+	waits := []time.Duration{1500 * time.Millisecond, 2500 * time.Millisecond, 4 * time.Second, 6 * time.Second}
+	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, req)
+	for i := 0; err != nil && isConcurrencyLimitError(err) && i < len(waits); i++ {
+		timer := time.NewTimer(waits[i])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, nil, ctx.Err()
+		case <-timer.C:
+		}
+		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, req)
+	}
+	return eventsCh, errCh, err
+}
+
 func startPlaygroundWithFallback(
 	ctx context.Context,
 	client *stepstudio.Client,
@@ -338,20 +492,18 @@ func startPlaygroundWithFallback(
 	extracted *translator.ExtractedRequest,
 ) (<-chan stepstudio.StudioEvent, <-chan error, error) {
 	fitted := fitPlaygroundChatRequest(convID, baseReq, extracted.BaseSystem, extracted.ToolProtocol, maxStudioRequestBodyBytes)
-	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, fitted)
+	eventsCh, errCh, err := streamWithConcurrencyRetry(ctx, client, convID, fitted)
 	if err != nil && isInvalidBodyError(err) {
 		dumpInvalidBodyDebug(rawModel, rawPayload, fitted)
 		retryReq := baseReq
 		retryReq.EnableWebSearch = false
 		retryReq = fitPlaygroundChatRequest(convID, retryReq, extracted.BaseSystem, extracted.ToolProtocol, 450*1024)
-		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq)
+		eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, retryReq)
 		if err != nil && isInvalidBodyError(err) {
-			// Keep ToolProtocol intact even on final fallback so the model never
-			// loses declared client tools or reverts to Studio's /home/jovyan prompt.
 			retryReq2 := baseReq
 			retryReq2.EnableWebSearch = false
 			retryReq2 = fitPlaygroundChatRequest(convID, retryReq2, "", extracted.ToolProtocol, 150*1024)
-			eventsCh, errCh, err = client.StreamPlayground(ctx, convID, retryReq2)
+			eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, retryReq2)
 		}
 	}
 	return eventsCh, errCh, err
@@ -363,16 +515,17 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		return nil, fmt.Errorf("decode executor.execute_stream request: %w", err)
 	}
 
-	token, webID := p.extractCredentials(req.StorageJSON, req.AuthMetadata)
+	token, webID, authFile := p.extractCredentialsWithSource(req.StorageJSON, req.AuthMetadata)
 	if token == "" {
 		return nil, pluginabi.NewError("unauthorized", "no StepFun Oasis-Token found in credentials", http.StatusUnauthorized)
 	}
 
-	cleanModel := CleanModelName(req.Model, p.Config().ModelPrefix)
+	cleanModel, effortSuffix := splitModelAndEffortSuffix(CleanModelName(req.Model, p.Config().ModelPrefix))
 	extracted, err := translator.ParseOpenAIRequest(req.Payload, p.Config().DefaultThinking, p.Config().DefaultEffort)
 	if err != nil {
 		return nil, fmt.Errorf("parse request payload: %w", err)
 	}
+	applyModelEffortHint(extracted, effortSuffix)
 	clampExtractedForStudio(cleanModel, extracted)
 
 	ctx, cancel := context.WithTimeout(p.ctx, 10*time.Minute)
@@ -388,6 +541,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		cancel()
 		return nil, fmt.Errorf("create upstream conversation failed: %w", err)
 	}
+	p.rememberFreshToken(token, client.GetToken(), webID, authFile)
 
 	turnText := translator.RenderTranscript(extracted.Messages)
 	if strings.TrimSpace(turnText) == "" {
@@ -412,7 +566,9 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	eventsCh, errCh, err := startPlaygroundWithFallback(ctx, client, convID, req.Model, req.Payload, chatReq, extracted)
 	if err != nil {
 		cancel()
-		p.noteStudioUpstreamFailure(cleanModel, err)
+		if !isConcurrencyLimitError(err) {
+			p.noteStudioUpstreamFailure(cleanModel, err)
+		}
 		if pErr := pluginErrorFromUpstreamErr(err); pErr != nil {
 			return nil, pErr
 		}
@@ -428,20 +584,28 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	trans.SetTools(extracted.Tools)
 
 	go func() {
-		defer cancel()
+		earlyCut := false
+		defer func() {
+			if !earlyCut {
+				cancel()
+			}
+		}()
 		for ev := range eventsCh {
 			chunks := trans.TranslateEvent(ev)
 			for _, chunk := range chunks {
 				_ = p.emitStreamChunk(streamID, chunk)
 			}
 			if trans.Done() {
-				cancel()
+				earlyCut = true
 				_ = p.closeStream(streamID, nil)
+				go drainStudioStreamQuietly(eventsCh, errCh, cancel, upstreamBackgroundDrainTimeout)
 				return
 			}
 		}
 		if sErr := <-errCh; sErr != nil {
-			p.noteStudioUpstreamFailure(cleanModel, sErr)
+			if !isConcurrencyLimitError(sErr) {
+				p.noteStudioUpstreamFailure(cleanModel, sErr)
+			}
 			pErr := pluginErrorFromUpstreamErr(sErr)
 			if pErr == nil {
 				pErr = pluginabi.NewError("upstream_stream_error", sErr.Error(), http.StatusBadGateway)
@@ -473,21 +637,27 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		return nil, err
 	}
 
-	token, webID := p.extractCredentials(req.StorageJSON, req.AuthMetadata)
+	token, webID, authFile := p.extractCredentialsWithSource(req.StorageJSON, req.AuthMetadata)
 	if token == "" {
 		return nil, pluginabi.NewError("unauthorized", "no StepFun Oasis-Token found in credentials", http.StatusUnauthorized)
 	}
 
-	cleanModel := CleanModelName(req.Model, p.Config().ModelPrefix)
+	cleanModel, effortSuffix := splitModelAndEffortSuffix(CleanModelName(req.Model, p.Config().ModelPrefix))
 	extracted, err := translator.ParseOpenAIRequest(req.Payload, p.Config().DefaultThinking, p.Config().DefaultEffort)
 	if err != nil {
 		return nil, err
 	}
+	applyModelEffortHint(extracted, effortSuffix)
 	clampExtractedForStudio(cleanModel, extracted)
 
 	client := stepstudio.NewClient(p.Config().BaseURL, token, webID, nil)
 	ctx, cancel := context.WithTimeout(p.ctx, 5*time.Minute)
-	defer cancel()
+	earlyCut := false
+	defer func() {
+		if !earlyCut {
+			cancel()
+		}
+	}()
 	assetIDs, err := uploadTurnImages(ctx, client, extracted.Images)
 	if err != nil {
 		return nil, pluginabi.NewError("image_upload_failed", "上传图片到 StepFun Studio 失败: "+err.Error(), http.StatusBadGateway)
@@ -497,6 +667,7 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	p.rememberFreshToken(token, client.GetToken(), webID, authFile)
 
 	turnText := translator.RenderTranscript(extracted.Messages)
 	if strings.TrimSpace(turnText) == "" {
@@ -520,7 +691,9 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 
 	eventsCh, errCh, err := startPlaygroundWithFallback(ctx, client, convID, req.Model, req.Payload, chatReq, extracted)
 	if err != nil {
-		p.noteStudioUpstreamFailure(cleanModel, err)
+		if !isConcurrencyLimitError(err) {
+			p.noteStudioUpstreamFailure(cleanModel, err)
+		}
 		if pErr := pluginErrorFromUpstreamErr(err); pErr != nil {
 			return nil, pErr
 		}
@@ -541,7 +714,6 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	suppressedBlocks := map[int]bool{}
 	var droppedTools []string
 	completedDeclaredTools := 0
-	stoppedEarly := false
 
 eventLoop:
 	for ev := range eventsCh {
@@ -554,14 +726,14 @@ eventLoop:
 				break
 			}
 			if completedDeclaredTools > 0 && len(activeToolBlocks) == 0 {
-				stoppedEarly = true
-				cancel()
+				earlyCut = true
+				go drainStudioStreamQuietly(eventsCh, errCh, cancel, upstreamBackgroundDrainTimeout)
 				break eventLoop
 			}
 		case stepstudio.EventTextDelta:
 			if completedDeclaredTools > 0 && len(activeToolBlocks) == 0 {
-				stoppedEarly = true
-				cancel()
+				earlyCut = true
+				go drainStudioStreamQuietly(eventsCh, errCh, cancel, upstreamBackgroundDrainTimeout)
 				break eventLoop
 			}
 			var d stepstudio.DeltaData
@@ -570,8 +742,8 @@ eventLoop:
 			}
 		case stepstudio.EventReasoningDelta:
 			if completedDeclaredTools > 0 && len(activeToolBlocks) == 0 {
-				stoppedEarly = true
-				cancel()
+				earlyCut = true
+				go drainStudioStreamQuietly(eventsCh, errCh, cancel, upstreamBackgroundDrainTimeout)
 				break eventLoop
 			}
 			var d stepstudio.DeltaData
@@ -625,8 +797,8 @@ eventLoop:
 			if suppressedBlocks[d.BlockIndex] {
 				delete(suppressedBlocks, d.BlockIndex)
 				if completedDeclaredTools == 0 && len(activeToolBlocks) == 0 {
-					stoppedEarly = true
-					cancel()
+					earlyCut = true
+					go drainStudioStreamQuietly(eventsCh, errCh, cancel, upstreamBackgroundDrainTimeout)
 					break eventLoop
 				}
 				break
@@ -642,9 +814,11 @@ eventLoop:
 		}
 	}
 
-	if !stoppedEarly {
+	if !earlyCut {
 		if sErr := <-errCh; sErr != nil {
-			p.noteStudioUpstreamFailure(cleanModel, sErr)
+			if !isConcurrencyLimitError(sErr) {
+				p.noteStudioUpstreamFailure(cleanModel, sErr)
+			}
 			if pErr := pluginErrorFromUpstreamErr(sErr); pErr != nil {
 				return nil, pErr
 			}

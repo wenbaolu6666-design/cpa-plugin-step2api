@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/WenPaul/cpa-plugin-step2api/internal/stepstudio"
@@ -46,5 +47,37 @@ func TestFitPlaygroundChatRequestPreservesToolProtocolUnder1MiB(t *testing.T) {
 	}
 	if !strings.Contains(fitted.Content, "请继续执行最后一步核验") {
 		t.Fatal("recent tail of conversation must be preserved")
+	}
+}
+
+func TestSplitModelAndEffortSuffixAndErrorClassification(t *testing.T) {
+	base, hint := splitModelAndEffortSuffix("step-5-preview(max)")
+	if base != "step-5-preview" || hint != "max" {
+		t.Fatalf("unexpected split: base=%q hint=%q", base, hint)
+	}
+	concErr := &stepstudio.APIError{
+		StatusCode: 429,
+		BizCode:    "STUDIO_RATE_LIMITED",
+		Message:    "concurrency reached, current: 6, limit: 5",
+	}
+	if !isConcurrencyLimitError(concErr) {
+		t.Fatal("expected concurrency error detection")
+	}
+	pErr := pluginErrorFromUpstreamErr(concErr)
+	if pErr == nil || pErr.HTTPStatus != 503 || !pErr.Retryable || strings.Contains(pErr.Message, "额度") {
+		t.Fatalf("concurrency error must return 503 without quota keyword: %+v", pErr)
+	}
+
+	evCh := make(chan stepstudio.StudioEvent, 2)
+	errCh := make(chan error, 1)
+	evCh <- stepstudio.StudioEvent{Type: stepstudio.EventDone}
+	close(evCh)
+	close(errCh)
+	canceled := make(chan struct{})
+	drainStudioStreamQuietly(evCh, errCh, func() { close(canceled) }, time.Second)
+	select {
+	case <-canceled:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected cancel callback after draining closed channel")
 	}
 }
