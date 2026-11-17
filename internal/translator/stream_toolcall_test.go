@@ -10,6 +10,7 @@ import (
 
 func TestStreamTranslatorConvertsTextJSONToToolCall(t *testing.T) {
 	tr := NewStreamTranslator("step-5-preview")
+	tr.SetTools([]any{map[string]any{"type": "function", "function": map[string]any{"name": "get_weather"}}})
 	for _, delta := range []string{`{"name":"get_weather",`, `"arguments":{"city":"北京"}}`} {
 		chunks := tr.TranslateEvent(stepstudio.StudioEvent{
 			Type: stepstudio.EventTextDelta,
@@ -85,6 +86,7 @@ func TestStreamTranslatorNormalizesNativeToolArguments(t *testing.T) {
 
 func TestStreamTranslatorDropsPreToolUnavailableText(t *testing.T) {
 	tr := NewStreamTranslator("step-5-preview")
+	tr.SetTools([]any{map[string]any{"type": "function", "function": map[string]any{"name": "exec_command"}}})
 	chunks := tr.TranslateEvent(stepstudio.StudioEvent{
 		Type: stepstudio.EventTextDelta,
 		Data: []byte(`{"delta":"` + "`exec_command` 这次调用不可用" + `"}`),
@@ -154,5 +156,31 @@ func TestStreamTranslatorDropsUndeclaredNativeToolCalls(t *testing.T) {
 	}
 	if !strings.Contains(all, "python") {
 		t.Fatalf("expected a notice naming the dropped tool: %s", all)
+	}
+}
+func TestStreamTranslatorDropsUnavailableTextSplitAcrossDeltas(t *testing.T) {
+	tr := NewStreamTranslator("step-5-preview")
+	tr.SetTools([]any{map[string]any{"type": "function", "function": map[string]any{"name": "exec_command"}}})
+
+	var chunks [][]byte
+	for _, delta := range []string{"e", "xec_command", " 工具在当前运行时不可用。"} {
+		data, _ := json.Marshal(map[string]any{"delta": delta})
+		chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventTextDelta, Data: data})...)
+	}
+
+	start, _ := json.Marshal(map[string]any{
+		"block_index": 0, "tool_call_id": "call_1", "tool_name": "exec_command", "arguments_json": "",
+	})
+	delta, _ := json.Marshal(map[string]any{"block_index": 0, "progress_text": `{"cmd":"dir"}`})
+	stop, _ := json.Marshal(map[string]any{"block_index": 0})
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallStart, Data: start})...)
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallDelta, Data: delta})...)
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventContentBlockStop, Data: stop})...)
+	chunks = append(chunks, tr.FinalChunks("stop", nil)...)
+
+	for _, chunk := range chunks {
+		if strings.Contains(string(chunk), "不可用") {
+			t.Fatalf("unavailable text leaked: %s", chunk)
+		}
 	}
 }
