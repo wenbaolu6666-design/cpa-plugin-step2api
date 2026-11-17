@@ -156,7 +156,7 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	case stepstudio.EventToolCallStart:
 		var data stepstudio.ToolCallStartData
 		_ = json.Unmarshal(ev.Data, &data)
-		if !t.hasTool(data.ToolName) {
+		if len(t.tools) > 0 && !t.hasTool(data.ToolName) {
 			if t.suppressed == nil {
 				t.suppressed = map[int]string{}
 			}
@@ -298,7 +298,7 @@ func (t *StreamTranslator) FinalChunks(reason string, usage map[string]any) [][]
 	if !t.textStreamed && t.textBuffer.Len() > 0 {
 		text := t.textBuffer.String()
 		t.textBuffer.Reset()
-		if call, ok := ParseToolCallTextWithTools(text, t.tools); ok && t.hasTool(call.Name) {
+		if call, ok := ParseToolCallTextWithTools(text, t.tools); ok && (len(t.tools) == 0 || t.hasTool(call.Name)) {
 			t.hasToolCalls = true
 			toolCall := OpenAIToolCall(call.Name, call.Arguments)
 			toolCall["index"] = 0

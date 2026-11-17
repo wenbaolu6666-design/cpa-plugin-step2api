@@ -123,3 +123,36 @@ func quoteJSON(value string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`, "\t", `\t`)
 	return `"` + replacer.Replace(value) + `"`
 }
+
+func TestStreamTranslatorDropsUndeclaredNativeToolCalls(t *testing.T) {
+	declared := []any{map[string]any{
+		"type":     "function",
+		"function": map[string]any{"name": "exec_command"},
+	}}
+	tr := NewStreamTranslator("step-5-preview")
+	tr.SetTools(declared)
+
+	start, _ := json.Marshal(map[string]any{
+		"block_index": 0, "tool_call_id": "call_1", "tool_name": "python", "arguments_json": "",
+	})
+	delta, _ := json.Marshal(map[string]any{"block_index": 0, "progress_text": `{"code":"print(1)"}`})
+	stop, _ := json.Marshal(map[string]any{"block_index": 0})
+
+	var chunks [][]byte
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallStart, Data: start})...)
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallDelta, Data: delta})...)
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventContentBlockStop, Data: stop})...)
+	chunks = append(chunks, tr.FinalChunks("stop", nil)...)
+
+	var joined strings.Builder
+	for _, chunk := range chunks {
+		joined.Write(chunk)
+	}
+	all := joined.String()
+	if strings.Contains(all, "tool_calls") {
+		t.Fatalf("undeclared tool call leaked to client: %s", all)
+	}
+	if !strings.Contains(all, "python") {
+		t.Fatalf("expected a notice naming the dropped tool: %s", all)
+	}
+}
