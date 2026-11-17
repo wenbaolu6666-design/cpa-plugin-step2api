@@ -456,20 +456,28 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	finishReason := "stop"
 	content := contentBuilder.String()
 	var toolCalls []map[string]any
-	if len(nativeToolCalls) > 0 {
-		finishReason = "tool_calls"
-		for _, call := range nativeToolCalls {
-			item := translator.OpenAIToolCall(call.Name, translator.NormalizeToolArguments(call.Name, call.Args, extracted.Tools))
-			if call.ID != "" {
-				item["id"] = call.ID
-			}
-			toolCalls = append(toolCalls, item)
+	var droppedTools []string
+	for _, call := range nativeToolCalls {
+		if call.Name != "" && !translator.ToolDeclared(extracted.Tools, call.Name) {
+			droppedTools = append(droppedTools, call.Name)
+			continue
 		}
+		item := translator.OpenAIToolCall(call.Name, translator.NormalizeToolArguments(call.Name, call.Args, extracted.Tools))
+		if call.ID != "" {
+			item["id"] = call.ID
+		}
+		toolCalls = append(toolCalls, item)
+	}
+	if len(toolCalls) > 0 {
+		finishReason = "tool_calls"
 		content = ""
-	} else if call, ok := translator.ParseToolCallTextWithTools(content, extracted.Tools); ok {
+	} else if call, ok := translator.ParseToolCallTextWithTools(content, extracted.Tools); ok && translator.ToolDeclared(extracted.Tools, call.Name) {
 		finishReason = "tool_calls"
 		toolCalls = []map[string]any{translator.OpenAIToolCall(call.Name, call.Arguments)}
 		content = ""
+	} else if len(droppedTools) > 0 {
+		finishReason = "stop"
+		content = fmt.Sprintf("（上游尝试调用内置工具 %s，本环境没有这些工具，该调用已忽略。请重试，或改用其他模型。）", strings.Join(droppedTools, ", "))
 	}
 
 	message := map[string]any{
