@@ -51,6 +51,8 @@ type Plugin struct {
 	loginStates  map[string]*loginSessionState
 	blockedMu    sync.RWMutex
 	blockedUntil map[string]time.Time
+	tokenCacheMu sync.RWMutex
+	tokenCache   map[string]string
 }
 
 func NewPlugin(hostCall HostCallFunc) *Plugin {
@@ -62,6 +64,7 @@ func NewPlugin(hostCall HostCallFunc) *Plugin {
 		config:       DefaultPluginConfig(),
 		loginStates:  make(map[string]*loginSessionState),
 		blockedUntil: make(map[string]time.Time),
+		tokenCache:   make(map[string]string),
 	}
 }
 
