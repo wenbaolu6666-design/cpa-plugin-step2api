@@ -132,7 +132,7 @@ func (p *Plugin) handleModelStatic(raw []byte) (any, error) {
 		}
 	}
 
-	rawModels := buildCatalogModels()
+	rawModels := stepstudio.BuildPluginStaticModels()
 	var filtered []pluginapi.ModelInfo
 	for _, m := range rawModels {
 		if !isModelGloballyOrAllAccountsExcluded(catalogBaseModelID(m.ID), globalRules, accounts) {
@@ -173,7 +173,7 @@ func (p *Plugin) handleModelForAuth(raw []byte) (any, error) {
 	accRules = append(accRules, globalRules...)
 	accRules = append(accRules, payload.ExcludedModels...)
 
-	rawModels := buildCatalogModels()
+	rawModels := stepstudio.BuildPluginStaticModels()
 	var filtered []pluginapi.ModelInfo
 	for _, m := range rawModels {
 		excluded := false
@@ -196,7 +196,9 @@ func (p *Plugin) handleModelForAuth(raw []byte) (any, error) {
 
 // buildCatalogModels exposes only the step2api/ prefixed ids. Registering the
 // bare ids as well would list the same model twice under one credential.
-func buildCatalogModels() []pluginapi.ModelInfo {
+// staticCatalogModels lists only the step2api/ prefixed ids so the shared
+// /v1/models catalog has no duplicates.
+func staticCatalogModels() []pluginapi.ModelInfo {
 	base := stepstudio.BuildPluginStaticModels()
 	out := make([]pluginapi.ModelInfo, 0, len(base))
 	for _, model := range base {
@@ -208,6 +210,13 @@ func buildCatalogModels() []pluginapi.ModelInfo {
 		out = append(out, alias)
 	}
 	return out
+}
+
+// authCatalogModels lists the bare StepFun ids. Core resolves a credential by
+// the provider-native model name, so the auth entry must keep the bare id;
+// exposing it only here avoids showing two identical models per credential.
+func authCatalogModels() []pluginapi.ModelInfo {
+	return stepstudio.BuildPluginStaticModels()
 }
 
 func catalogBaseModelID(id string) string {

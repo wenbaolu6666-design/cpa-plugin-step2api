@@ -8,8 +8,8 @@
 
 ### 本次更新
 
-- 每个 Step2API 凭据现在只登记一条模型 `step2api/step-5-preview`，不再同时登记裸名 `step-5-preview`，凭据详情与模型选择列表不会再出现重复项。
-- 不带前缀的 `step-5-preview` 仍由 Step Plan 渠道提供，路由行为不变。
+- 每个 Step2API 凭据与模型列表只登记一条 `step-5-preview`，不再同时出现裸名与前缀别名两条重复项。
+- 网关侧对应把该插件的 `route_unprefixed_models` 设为 `true`、`plan_weight` 设为 `0`，使 `step-5-preview` 直接走可用的 Studio 通道，不再先撞 Step Plan 的空额度 429。
 
 ### 是否需要升级
 
