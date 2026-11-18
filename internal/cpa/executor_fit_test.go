@@ -81,3 +81,14 @@ func TestSplitModelAndEffortSuffixAndErrorClassification(t *testing.T) {
 		t.Fatal("expected cancel callback after draining closed channel")
 	}
 }
+
+func TestSafetyReviewErrorIsReportedAsRetryableBusy(t *testing.T) {
+	safetyErr := &stepstudio.APIError{StatusCode: 500, Message: "safety review failed"}
+	if !isSafetyReviewError(safetyErr) {
+		t.Fatal("expected safety review detection")
+	}
+	pErr := pluginErrorFromUpstreamErr(safetyErr)
+	if pErr == nil || pErr.Code != "upstream_safety_review" || !pErr.Retryable || pErr.HTTPStatus != 503 {
+		t.Fatalf("unexpected mapping: %+v", pErr)
+	}
+}
