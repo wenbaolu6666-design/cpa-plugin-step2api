@@ -8,8 +8,9 @@
 
 ### 本次更新
 
-- 每个 Step2API 凭据只保留一条模型记录，显示名为 `step2api/step-5-preview`，不再出现两条重复项。
-- 说明：核心按裸模型名匹配凭证，前缀只能作为显示名；因此模型 ID 仍为 `step-5-preview`，界面与复制入口展示 `step2api/step-5-preview`。
+- 每个 Step2API 凭据只保留一条模型记录 `step2api/step-5-preview`，不再出现两条重复项。
+- 路由修正：带前缀请求原样传给核心匹配凭证，修复此前 `auth_not_found` 的问题；模型列表与模型选择器均只显示 `step2api/step-5-preview`。
+- 网关侧移除 Step Plan 渠道里无额度的裸名 `step-5-preview` 条目，避免选择到不可用模型。
 
 ### 是否需要升级
 

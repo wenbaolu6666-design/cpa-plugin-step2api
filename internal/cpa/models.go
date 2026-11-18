@@ -132,7 +132,7 @@ func (p *Plugin) handleModelStatic(raw []byte) (any, error) {
 		}
 	}
 
-	rawModels := labeledCatalogModels()
+	rawModels := aliasCatalogModels()
 	var filtered []pluginapi.ModelInfo
 	for _, m := range rawModels {
 		if !isModelGloballyOrAllAccountsExcluded(catalogBaseModelID(m.ID), globalRules, accounts) {
@@ -173,7 +173,7 @@ func (p *Plugin) handleModelForAuth(raw []byte) (any, error) {
 	accRules = append(accRules, globalRules...)
 	accRules = append(accRules, payload.ExcludedModels...)
 
-	rawModels := labeledCatalogModels()
+	rawModels := aliasCatalogModels()
 	var filtered []pluginapi.ModelInfo
 	for _, m := range rawModels {
 		excluded := false
@@ -296,7 +296,7 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 			Handled:     true,
 			TargetKind:  pluginapi.ModelRouteTargetProvider,
 			Target:      ProviderID,
-			TargetModel: routeModel,
+			TargetModel: ProviderID + "/" + cleanModel,
 		}, nil
 	}
 
@@ -305,7 +305,7 @@ func (p *Plugin) handleModelRoute(raw []byte) (any, error) {
 			Handled:     true,
 			TargetKind:  pluginapi.ModelRouteTargetProvider,
 			Target:      ProviderID,
-			TargetModel: routeModel,
+			TargetModel: ProviderID + "/" + cleanModel,
 		}, nil
 	}
 
