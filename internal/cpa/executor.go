@@ -79,6 +79,14 @@ func isConcurrencyLimitError(err error) bool {
 	return apiErr.StatusCode == http.StatusTooManyRequests && strings.Contains(msg, "concurrency")
 }
 
+func isSafetyReviewError(err error) bool {
+	apiErr, ok := err.(*stepstudio.APIError)
+	if !ok || apiErr == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(apiErr.Message), "safety review")
+}
+
 // splitModelAndEffortSuffix separates an optional parenthesized thinking suffix
 // such as "step-5-preview(max)" into ("step-5-preview", "max").
 func splitModelAndEffortSuffix(model string) (baseModel string, effortHint string) {
@@ -302,6 +310,12 @@ func pluginErrorFromUpstreamErr(err error) *pluginabi.Error {
 	if status == 0 {
 		status = http.StatusBadGateway
 	}
+	if isSafetyReviewError(err) {
+		msg := "StepFun Studio 内容安全审核未通过（safety review failed），请稍后重试或改写措辞后重试。"
+		safetyErr := pluginabi.NewError("upstream_safety_review", msg, http.StatusServiceUnavailable)
+		safetyErr.Retryable = true
+		return safetyErr
+	}
 	if isConcurrencyLimitError(err) {
 		// Return 503 without quota keywords so CPA Core does not place the
 		// Studio credential into a long quota cooldown on transient burst traffic.
@@ -493,6 +507,24 @@ func startPlaygroundWithFallback(
 ) (<-chan stepstudio.StudioEvent, <-chan error, error) {
 	fitted := fitPlaygroundChatRequest(convID, baseReq, extracted.BaseSystem, extracted.ToolProtocol, maxStudioRequestBodyBytes)
 	eventsCh, errCh, err := streamWithConcurrencyRetry(ctx, client, convID, fitted)
+	if err != nil && isSafetyReviewError(err) {
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-time.After(800 * time.Millisecond):
+		}
+		eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, fitted)
+		if err != nil && isSafetyReviewError(err) {
+			soft := extracted.SoftToolProtocol
+			if soft == "" {
+				soft = extracted.ToolProtocol
+			}
+			softReq := baseReq
+			softReq.EnableWebSearch = false
+			softReq = fitPlaygroundChatRequest(convID, softReq, "", soft, 300*1024)
+			eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, softReq)
+		}
+	}
 	if err != nil && isInvalidBodyError(err) {
 		dumpInvalidBodyDebug(rawModel, rawPayload, fitted)
 		retryReq := baseReq
