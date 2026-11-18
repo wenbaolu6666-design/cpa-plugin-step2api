@@ -194,15 +194,12 @@ func (p *Plugin) handleModelForAuth(raw []byte) (any, error) {
 	}, nil
 }
 
-// buildCatalogModels exposes both the bare StepFun ids and the step2api/
-// prefixed aliases. The prefixed entries are not claimed by any native
-// provider, so core registers this plugin's executor and auth models, while
-// the bare ids keep the normal /v1/models surface intact.
+// buildCatalogModels exposes only the step2api/ prefixed ids. Registering the
+// bare ids as well would list the same model twice under one credential.
 func buildCatalogModels() []pluginapi.ModelInfo {
 	base := stepstudio.BuildPluginStaticModels()
-	out := make([]pluginapi.ModelInfo, 0, len(base)*2)
+	out := make([]pluginapi.ModelInfo, 0, len(base))
 	for _, model := range base {
-		out = append(out, model)
 		alias := model
 		alias.ID = ProviderID + "/" + model.ID
 		if alias.DisplayName == "" {
