@@ -132,7 +132,7 @@ func (p *Plugin) handleModelStatic(raw []byte) (any, error) {
 		}
 	}
 
-	rawModels := stepstudio.BuildPluginStaticModels()
+	rawModels := labeledCatalogModels()
 	var filtered []pluginapi.ModelInfo
 	for _, m := range rawModels {
 		if !isModelGloballyOrAllAccountsExcluded(catalogBaseModelID(m.ID), globalRules, accounts) {
@@ -173,7 +173,7 @@ func (p *Plugin) handleModelForAuth(raw []byte) (any, error) {
 	accRules = append(accRules, globalRules...)
 	accRules = append(accRules, payload.ExcludedModels...)
 
-	rawModels := stepstudio.BuildPluginStaticModels()
+	rawModels := labeledCatalogModels()
 	var filtered []pluginapi.ModelInfo
 	for _, m := range rawModels {
 		excluded := false
@@ -219,6 +219,37 @@ func authCatalogModels() []pluginapi.ModelInfo {
 	return stepstudio.BuildPluginStaticModels()
 }
 
+// aliasCatalogModels exposes a single step2api/ prefixed id per model while
+// keeping the provider-native bare name in Name so core can still resolve the
+// credential for that model.
+func aliasCatalogModels() []pluginapi.ModelInfo {
+	base := stepstudio.BuildPluginStaticModels()
+	out := make([]pluginapi.ModelInfo, 0, len(base))
+	for _, model := range base {
+		alias := model
+		alias.Name = model.ID
+		alias.ID = ProviderID + "/" + model.ID
+		if alias.DisplayName == "" {
+			alias.DisplayName = model.ID
+		}
+		out = append(out, alias)
+	}
+	return out
+}
+
+// labeledCatalogModels keeps the provider-native bare id (core resolves
+// credentials by it) and publishes the step2api/ prefix as the display label.
+func labeledCatalogModels() []pluginapi.ModelInfo {
+	base := stepstudio.BuildPluginStaticModels()
+	out := make([]pluginapi.ModelInfo, 0, len(base))
+	for _, model := range base {
+		item := model
+		item.Name = model.ID
+		item.DisplayName = ProviderID + "/" + model.ID
+		out = append(out, item)
+	}
+	return out
+}
 func catalogBaseModelID(id string) string {
 	id = strings.TrimSpace(id)
 	id = strings.TrimPrefix(id, ProviderID+"/")
