@@ -218,7 +218,7 @@ func TestStreamTranslatorCutsStudioPostToolServerLoopAfterPreamble(t *testing.T)
 
 	// Block 3: Studio server-side harness rejects exec_command and starts Step 2 reasoning
 	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 3, "block_type": "CONTENT_BLOCK_TYPE_REASONING"})
-	if !tr.Done() {
+	if !tr.CutDue() {
 		t.Fatal("translator must mark Done() immediately when post-tool reasoning starts")
 	}
 
@@ -227,6 +227,7 @@ func TestStreamTranslatorCutsStudioPostToolServerLoopAfterPreamble(t *testing.T)
 	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 4, "block_type": "CONTENT_BLOCK_TYPE_TEXT"})
 	emit(stepstudio.EventTextDelta, map[string]any{"block_index": 4, "delta": "抱歉，`exec_command` 工具在当前运行环境中不可用。"})
 
+	chunks = append(chunks, tr.FinalChunks(tr.CutReason(), nil)...)
 	var joined strings.Builder
 	for _, c := range chunks {
 		joined.Write(c)
@@ -280,7 +281,7 @@ func TestStreamTranslatorSupportsParallelDeclaredToolCallsWithSequentialIndices(
 	if !strings.Contains(all, `"index":0`) || !strings.Contains(all, `"index":1`) {
 		t.Fatalf("expected both parallel tool calls with indices 0 and 1: %s", all)
 	}
-	if !tr.Done() {
+	if !tr.CutDue() {
 		t.Fatal("expected Done() after parallel tool calls finish and reasoning starts")
 	}
 }
@@ -305,7 +306,7 @@ func TestStreamTranslatorAbortsImmediatelyOnUndeclaredBuiltinToolEvenAfterPreamb
 	emit(stepstudio.EventToolCallDelta, map[string]any{"block_index": 2, "progress_text": `{"code":"import os"}`})
 	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 2})
 
-	if !tr.Done() {
+	if !tr.CutDue() {
 		t.Fatal("expected Done() immediately on undeclared tool ContentBlockStop before /home/jovyan runs")
 	}
 
@@ -313,6 +314,7 @@ func TestStreamTranslatorAbortsImmediatelyOnUndeclaredBuiltinToolEvenAfterPreamb
 	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 4, "block_type": "CONTENT_BLOCK_TYPE_TEXT"})
 	emit(stepstudio.EventTextDelta, map[string]any{"block_index": 4, "delta": "当前处于 /home/jovyan Linux 沙箱"})
 
+	chunks = append(chunks, tr.FinalChunks(tr.CutReason(), nil)...)
 	var joined strings.Builder
 	for _, c := range chunks {
 		joined.Write(c)

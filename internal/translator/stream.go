@@ -31,6 +31,7 @@ type StreamTranslator struct {
 	completedToolCalls int
 	suppressed         map[int]string
 	dropped            []string
+	cutReason          string
 }
 
 func NewStreamTranslator(model string) *StreamTranslator {
@@ -51,6 +52,17 @@ func (t *StreamTranslator) SetTools(tools []any) {
 // can immediately abort any subsequent server-side Studio agent loop turns.
 func (t *StreamTranslator) Done() bool {
 	return t.SentFinish
+}
+
+// CutDue reports that the client-facing turn is complete but the terminal
+// frame has not been emitted yet, so the caller can capture usage first.
+func (t *StreamTranslator) CutDue() bool {
+	return t.cutReason != "" && !t.SentFinish
+}
+
+// CutReason returns the finish reason recorded at the cut point.
+func (t *StreamTranslator) CutReason() string {
+	return t.cutReason
 }
 
 // hasTool reports whether the client declared the named tool. Studio's own
@@ -114,7 +126,7 @@ func (t *StreamTranslator) shouldStopAfterCompletedToolCalls() bool {
 }
 
 func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
-	if t.SentFinish {
+	if t.SentFinish || t.cutReason != "" {
 		return nil
 	}
 	var out [][]byte
@@ -122,7 +134,8 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 	switch ev.Type {
 	case stepstudio.EventMessageStart:
 		if t.shouldStopAfterCompletedToolCalls() {
-			return t.FinalChunks("tool_calls", nil)
+			t.cutReason = "tool_calls"
+			return nil
 		}
 		var data stepstudio.MessageStartData
 		_ = json.Unmarshal(ev.Data, &data)
@@ -150,7 +163,8 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 		// stream. Cut the stream right here so the client executes the tool
 		// instead of receiving Studio's bogus "tool unavailable" turn.
 		if t.shouldStopAfterCompletedToolCalls() {
-			return t.FinalChunks("tool_calls", nil)
+			t.cutReason = "tool_calls"
+			return nil
 		}
 		if r := t.RoleChunk(); r != nil {
 			out = append(out, r)
@@ -164,7 +178,8 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 
 	case stepstudio.EventReasoningDelta:
 		if t.shouldStopAfterCompletedToolCalls() {
-			return t.FinalChunks("tool_calls", nil)
+			t.cutReason = "tool_calls"
+			return nil
 		}
 		var data stepstudio.DeltaData
 		_ = json.Unmarshal(ev.Data, &data)
@@ -177,7 +192,8 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 
 	case stepstudio.EventTextDelta:
 		if t.shouldStopAfterCompletedToolCalls() {
-			return t.FinalChunks("tool_calls", nil)
+			t.cutReason = "tool_calls"
+			return nil
 		}
 		var data stepstudio.DeltaData
 		_ = json.Unmarshal(ev.Data, &data)
@@ -287,7 +303,8 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 			// Abort immediately before Studio executes its server-side sandbox
 			// (/home/jovyan python, document_parser, etc.) and pollutes the turn.
 			if !t.hasToolCalls && len(t.activeToolBlocks) == 0 {
-				return t.FinalChunks("stop", nil)
+				t.cutReason = "stop"
+				return nil
 			}
 			break
 		}
@@ -500,4 +517,9 @@ func (t *StreamTranslator) FinalChunk(finishReason *string, usage map[string]any
 		return nil
 	}
 	return chunks[len(chunks)-1]
+}
+
+// UsageMap exposes the OpenAI-style usage map for a Studio usage record.
+func UsageMap(usage *stepstudio.UsageInfo) map[string]any {
+	return usageMapFrom(usage)
 }
