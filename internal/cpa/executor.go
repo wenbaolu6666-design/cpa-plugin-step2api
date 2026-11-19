@@ -127,6 +127,28 @@ func applyModelEffortHint(extracted *translator.ExtractedRequest, effortHint str
 // background until the channel closes (on EventDone) or timeout elapses, then
 // cancels ctx. Aborting the TCP connection before EventDone causes Studio's
 // server to hold the Redis concurrency slot for minutes.
+// drainForUsage discards the remaining Studio turn while waiting for the
+// terminal usage record, so tool-call turns still report token usage.
+func drainForUsage(eventsCh <-chan stepstudio.StudioEvent, errCh <-chan error, budget time.Duration) *stepstudio.UsageInfo {
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	for {
+		select {
+		case ev, ok := <-eventsCh:
+			if !ok {
+				return nil
+			}
+			if ev.Type == stepstudio.EventFinal {
+				var d stepstudio.FinalData
+				if json.Unmarshal(ev.Data, &d) == nil && d.Usage != nil {
+					return d.Usage
+				}
+			}
+		case <-timer.C:
+			return nil
+		}
+	}
+}
 func drainStudioStreamQuietly(
 	eventsCh <-chan stepstudio.StudioEvent,
 	errCh <-chan error,
@@ -627,7 +649,11 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 			for _, chunk := range chunks {
 				_ = p.emitStreamChunk(streamID, chunk)
 			}
-			if trans.Done() {
+			if trans.CutDue() {
+				usage := drainForUsage(eventsCh, errCh, 6*time.Second)
+				for _, chunk := range trans.FinalChunks(trans.CutReason(), translator.UsageMap(usage)) {
+					_ = p.emitStreamChunk(streamID, chunk)
+				}
 				earlyCut = true
 				_ = p.closeStream(streamID, nil)
 				go drainStudioStreamQuietly(eventsCh, errCh, cancel, upstreamBackgroundDrainTimeout)
