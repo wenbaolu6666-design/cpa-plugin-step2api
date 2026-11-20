@@ -354,3 +354,14 @@ func TestStreamTranslatorMapsBuiltinPythonToExecCommand(t *testing.T) {
 		t.Fatalf("expected python to be mapped to exec_command: %s", all)
 	}
 }
+
+func TestMapBuiltinFileWriteToExecCommand(t *testing.T) {
+	tools := []any{map[string]any{"type": "function", "function": map[string]any{"name": "exec_command"}}}
+	name, args, ok := MapBuiltinTool("file_write", `{"path":"C:\\tmp\\a.txt","content":"hello"}`, tools)
+	if !ok || name != "exec_command" {
+		t.Fatalf("expected mapping, got %q %q %v", name, args, ok)
+	}
+	if !strings.Contains(args, "WriteAllText") {
+		t.Fatalf("unexpected args: %s", args)
+	}
+}
