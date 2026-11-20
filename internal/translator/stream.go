@@ -1,6 +1,7 @@
 package translator
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -30,6 +31,7 @@ type StreamTranslator struct {
 	activeToolBlocks   map[int]bool
 	completedToolCalls int
 	suppressed         map[int]string
+	mappedBuiltin      map[int]string
 	dropped            []string
 	cutReason          string
 }
@@ -71,6 +73,35 @@ func (t *StreamTranslator) CutReason() string {
 // that never declared them makes the client reject the call.
 func (t *StreamTranslator) hasTool(name string) bool {
 	return ToolDeclared(t.tools, name)
+}
+
+// IsMappableBuiltin reports whether a built-in tool can be rewritten into a
+// declared client tool (argument parsing happens when deltas arrive).
+func IsMappableBuiltin(name string, tools []any) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "python") && ToolDeclared(tools, "exec_command")
+}
+
+// MapBuiltinTool rewrites a Studio built-in tool call into an equivalent
+// client-declared tool call so the turn can continue instead of ending.
+func MapBuiltinTool(name, args string, tools []any) (string, string, bool) {
+	if !strings.EqualFold(strings.TrimSpace(name), "python") || !ToolDeclared(tools, "exec_command") {
+		return "", "", false
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(args), &payload) != nil {
+		return "", "", false
+	}
+	code, _ := payload["code"].(string)
+	if strings.TrimSpace(code) == "" {
+		return "", "", false
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte(code))
+	cmd := "$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encoded + "')); $c | python -"
+	out, err := json.Marshal(map[string]any{"cmd": cmd})
+	if err != nil {
+		return "", "", false
+	}
+	return "exec_command", string(out), true
 }
 
 // ToolDeclared reports whether a client-facing tool list contains the name.
@@ -233,13 +264,21 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 		var data stepstudio.ToolCallStartData
 		_ = json.Unmarshal(ev.Data, &data)
 		if !t.hasTool(data.ToolName) {
-			delete(t.activeToolBlocks, data.BlockIndex)
-			if t.suppressed == nil {
-				t.suppressed = map[int]string{}
+			if IsMappableBuiltin(data.ToolName, t.tools) {
+				if t.mappedBuiltin == nil {
+					t.mappedBuiltin = map[int]string{}
+				}
+				t.mappedBuiltin[data.BlockIndex] = data.ToolName
+				data.ToolName = "exec_command"
+			} else {
+				delete(t.activeToolBlocks, data.BlockIndex)
+				if t.suppressed == nil {
+					t.suppressed = map[int]string{}
+				}
+				t.suppressed[data.BlockIndex] = data.ToolName
+				t.dropped = append(t.dropped, data.ToolName)
+				break
 			}
-			t.suppressed[data.BlockIndex] = data.ToolName
-			t.dropped = append(t.dropped, data.ToolName)
-			break
 		}
 		if t.activeToolBlocks == nil {
 			t.activeToolBlocks = map[int]bool{}
@@ -456,7 +495,13 @@ func (t *StreamTranslator) flushToolBuffer(blockIndex int) [][]byte {
 		return nil
 	}
 	delete(t.toolBuffers, blockIndex)
-	arguments := NormalizeToolArguments(t.toolNames[blockIndex], buffer.String(), t.tools)
+	rawArgs := buffer.String()
+	if original, okMap := t.mappedBuiltin[blockIndex]; okMap {
+		if _, mappedArgs, okConv := MapBuiltinTool(original, rawArgs, t.tools); okConv {
+			rawArgs = mappedArgs
+		}
+	}
+	arguments := NormalizeToolArguments(t.toolNames[blockIndex], rawArgs, t.tools)
 	if strings.TrimSpace(arguments) == "" {
 		arguments = "{}"
 	}

@@ -889,6 +889,14 @@ eventLoop:
 	var toolCalls []map[string]any
 	for _, call := range nativeToolCalls {
 		if call.Name != "" && !translator.ToolDeclared(extracted.Tools, call.Name) {
+			if mappedName, mappedArgs, okMap := translator.MapBuiltinTool(call.Name, call.Args, extracted.Tools); okMap {
+				item := translator.OpenAIToolCall(mappedName, mappedArgs)
+				if call.ID != "" {
+					item["id"] = call.ID
+				}
+				toolCalls = append(toolCalls, item)
+				continue
+			}
 			droppedTools = append(droppedTools, call.Name)
 			continue
 		}
