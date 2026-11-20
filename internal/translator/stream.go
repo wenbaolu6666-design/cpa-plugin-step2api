@@ -161,10 +161,25 @@ func builtinToCommand(name string, payload map[string]any) (string, bool) {
 
 func builtinToPlan(payload map[string]any) []map[string]any {
 	var items []any
-	for _, key := range []string{"todos", "items", "tasks", "plan", "steps"} {
-		if arr, ok := payload[key].([]any); ok {
-			items = arr
+	for _, key := range []string{"todos", "items", "tasks", "plan", "steps", "list"} {
+		switch v := payload[key].(type) {
+		case []any:
+			items = v
+		case string:
+			var arr []any
+			if json.Unmarshal([]byte(v), &arr) == nil {
+				items = arr
+			}
+		case map[string]any:
+			items = []any{v}
+		}
+		if items != nil {
 			break
+		}
+	}
+	if items == nil {
+		if firstString(payload, "step", "content", "title", "text", "task", "name") != "" {
+			items = []any{payload}
 		}
 	}
 	var plan []map[string]any
