@@ -78,30 +78,51 @@ func (t *StreamTranslator) hasTool(name string) bool {
 // IsMappableBuiltin reports whether a built-in tool can be rewritten into a
 // declared client tool (argument parsing happens when deltas arrive).
 func IsMappableBuiltin(name string, tools []any) bool {
-	return strings.EqualFold(strings.TrimSpace(name), "python") && ToolDeclared(tools, "exec_command")
+	return (strings.EqualFold(strings.TrimSpace(name), "python") || strings.EqualFold(strings.TrimSpace(name), "file_write")) && ToolDeclared(tools, "exec_command")
 }
 
 // MapBuiltinTool rewrites a Studio built-in tool call into an equivalent
 // client-declared tool call so the turn can continue instead of ending.
 func MapBuiltinTool(name, args string, tools []any) (string, string, bool) {
-	if !strings.EqualFold(strings.TrimSpace(name), "python") || !ToolDeclared(tools, "exec_command") {
+	lname := strings.ToLower(strings.TrimSpace(name))
+	if !ToolDeclared(tools, "exec_command") {
 		return "", "", false
 	}
 	var payload map[string]any
 	if json.Unmarshal([]byte(args), &payload) != nil {
 		return "", "", false
 	}
-	code, _ := payload["code"].(string)
-	if strings.TrimSpace(code) == "" {
-		return "", "", false
+	encode := func(v string) string { return base64.StdEncoding.EncodeToString([]byte(v)) }
+	switch lname {
+	case "python":
+		code, _ := payload["code"].(string)
+		if strings.TrimSpace(code) == "" {
+			return "", "", false
+		}
+		cmd := "$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encode(code) + "')); $c | python -"
+		out, err := json.Marshal(map[string]any{"cmd": cmd})
+		return "exec_command", string(out), err == nil
+	case "file_write":
+		path, _ := payload["path"].(string)
+		if path == "" {
+			path, _ = payload["file_path"].(string)
+		}
+		content, _ := payload["content"].(string)
+		if content == "" {
+			content, _ = payload["text"].(string)
+		}
+		if strings.TrimSpace(path) == "" || content == "" {
+			return "", "", false
+		}
+		cmd := "$p=" + psQuote(path) + "; $c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encode(content) + "')); [IO.File]::WriteAllText($p,$c,(New-Object Text.UTF8Encoding($false)))"
+		out, err := json.Marshal(map[string]any{"cmd": cmd})
+		return "exec_command", string(out), err == nil
 	}
-	encoded := base64.StdEncoding.EncodeToString([]byte(code))
-	cmd := "$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encoded + "')); $c | python -"
-	out, err := json.Marshal(map[string]any{"cmd": cmd})
-	if err != nil {
-		return "", "", false
-	}
-	return "exec_command", string(out), true
+	return "", "", false
+}
+
+func psQuote(v string) string {
+	return "'" + strings.ReplaceAll(v, "'", "''") + "'"
 }
 
 // ToolDeclared reports whether a client-facing tool list contains the name.
