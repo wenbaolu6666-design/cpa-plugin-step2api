@@ -135,7 +135,7 @@ func TestStreamTranslatorDropsUndeclaredNativeToolCalls(t *testing.T) {
 	tr.SetTools(declared)
 
 	start, _ := json.Marshal(map[string]any{
-		"block_index": 0, "tool_call_id": "call_1", "tool_name": "python", "arguments_json": "",
+		"block_index": 0, "tool_call_id": "call_1", "tool_name": "document_parser", "arguments_json": "",
 	})
 	delta, _ := json.Marshal(map[string]any{"block_index": 0, "progress_text": `{"code":"print(1)"}`})
 	stop, _ := json.Marshal(map[string]any{"block_index": 0})
@@ -154,7 +154,7 @@ func TestStreamTranslatorDropsUndeclaredNativeToolCalls(t *testing.T) {
 	if strings.Contains(all, "tool_calls") {
 		t.Fatalf("undeclared tool call leaked to client: %s", all)
 	}
-	if !strings.Contains(all, "python") {
+	if !strings.Contains(all, "document_parser") {
 		t.Fatalf("expected a notice naming the dropped tool: %s", all)
 	}
 }
@@ -302,7 +302,7 @@ func TestStreamTranslatorAbortsImmediatelyOnUndeclaredBuiltinToolEvenAfterPreamb
 	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 1})
 
 	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 2, "block_type": "CONTENT_BLOCK_TYPE_TOOL_CALL"})
-	emit(stepstudio.EventToolCallStart, map[string]any{"block_index": 2, "tool_call_id": "call_py", "tool_name": "python", "arguments_json": ""})
+	emit(stepstudio.EventToolCallStart, map[string]any{"block_index": 2, "tool_call_id": "call_py", "tool_name": "document_parser", "arguments_json": ""})
 	emit(stepstudio.EventToolCallDelta, map[string]any{"block_index": 2, "progress_text": `{"code":"import os"}`})
 	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 2})
 
@@ -320,10 +320,37 @@ func TestStreamTranslatorAbortsImmediatelyOnUndeclaredBuiltinToolEvenAfterPreamb
 		joined.Write(c)
 	}
 	all := joined.String()
-	if !strings.Contains(all, "python") {
+	if !strings.Contains(all, "document_parser") {
 		t.Fatalf("expected notice naming python even after preamble: %s", all)
 	}
 	if strings.Contains(all, "/home/jovyan") {
 		t.Fatalf("/home/jovyan output leaked: %s", all)
+	}
+}
+
+func TestStreamTranslatorMapsBuiltinPythonToExecCommand(t *testing.T) {
+	declared := []any{map[string]any{"type": "function", "function": map[string]any{"name": "exec_command"}}}
+	tr := NewStreamTranslator("step-5-preview")
+	tr.SetTools(declared)
+
+	start, _ := json.Marshal(map[string]any{"block_index": 0, "tool_call_id": "call_py", "tool_name": "python", "arguments_json": ""})
+	delta, _ := json.Marshal(map[string]any{"block_index": 0, "progress_text": `{"code":"print(1+1)"}`})
+	stop, _ := json.Marshal(map[string]any{"block_index": 0})
+
+	var chunks [][]byte
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallStart, Data: start})...)
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallDelta, Data: delta})...)
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventContentBlockStop, Data: stop})...)
+
+	var joined strings.Builder
+	for _, c := range chunks {
+		joined.Write(c)
+	}
+	all := joined.String()
+	if strings.Contains(all, `"name":"python"`) {
+		t.Fatalf("builtin python leaked: %s", all)
+	}
+	if !strings.Contains(all, `"name":"exec_command"`) || !strings.Contains(all, "python -") {
+		t.Fatalf("expected python to be mapped to exec_command: %s", all)
 	}
 }
