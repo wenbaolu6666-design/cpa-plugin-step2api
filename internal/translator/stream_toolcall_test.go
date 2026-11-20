@@ -135,7 +135,7 @@ func TestStreamTranslatorDropsUndeclaredNativeToolCalls(t *testing.T) {
 	tr.SetTools(declared)
 
 	start, _ := json.Marshal(map[string]any{
-		"block_index": 0, "tool_call_id": "call_1", "tool_name": "document_parser", "arguments_json": "",
+		"block_index": 0, "tool_call_id": "call_1", "tool_name": "deep_search", "arguments_json": "",
 	})
 	delta, _ := json.Marshal(map[string]any{"block_index": 0, "progress_text": `{"code":"print(1)"}`})
 	stop, _ := json.Marshal(map[string]any{"block_index": 0})
@@ -154,7 +154,7 @@ func TestStreamTranslatorDropsUndeclaredNativeToolCalls(t *testing.T) {
 	if strings.Contains(all, "tool_calls") {
 		t.Fatalf("undeclared tool call leaked to client: %s", all)
 	}
-	if !strings.Contains(all, "document_parser") {
+	if !strings.Contains(all, "deep_search") {
 		t.Fatalf("expected a notice naming the dropped tool: %s", all)
 	}
 }
@@ -302,7 +302,7 @@ func TestStreamTranslatorAbortsImmediatelyOnUndeclaredBuiltinToolEvenAfterPreamb
 	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 1})
 
 	emit(stepstudio.EventContentBlockStart, map[string]any{"block_index": 2, "block_type": "CONTENT_BLOCK_TYPE_TOOL_CALL"})
-	emit(stepstudio.EventToolCallStart, map[string]any{"block_index": 2, "tool_call_id": "call_py", "tool_name": "document_parser", "arguments_json": ""})
+	emit(stepstudio.EventToolCallStart, map[string]any{"block_index": 2, "tool_call_id": "call_py", "tool_name": "deep_search", "arguments_json": ""})
 	emit(stepstudio.EventToolCallDelta, map[string]any{"block_index": 2, "progress_text": `{"code":"import os"}`})
 	emit(stepstudio.EventContentBlockStop, map[string]any{"block_index": 2})
 
@@ -320,7 +320,7 @@ func TestStreamTranslatorAbortsImmediatelyOnUndeclaredBuiltinToolEvenAfterPreamb
 		joined.Write(c)
 	}
 	all := joined.String()
-	if !strings.Contains(all, "document_parser") {
+	if !strings.Contains(all, "deep_search") {
 		t.Fatalf("expected notice naming python even after preamble: %s", all)
 	}
 	if strings.Contains(all, "/home/jovyan") {
@@ -363,5 +363,16 @@ func TestMapBuiltinFileWriteToExecCommand(t *testing.T) {
 	}
 	if !strings.Contains(args, "WriteAllText") {
 		t.Fatalf("unexpected args: %s", args)
+	}
+}
+
+func TestMapBuiltinTodoToUpdatePlan(t *testing.T) {
+	tools := []any{map[string]any{"type": "function", "function": map[string]any{"name": "update_plan"}}}
+	name, args, ok := MapBuiltinTool("todo", `{"todos":[{"content":"读取文件","status":"done"},{"content":"写报告","status":"in_progress"}]}`, tools)
+	if !ok || name != "update_plan" {
+		t.Fatalf("expected todo mapping, got %q %v", name, ok)
+	}
+	if !strings.Contains(args, "completed") || !strings.Contains(args, "in_progress") {
+		t.Fatalf("unexpected plan args: %s", args)
 	}
 }

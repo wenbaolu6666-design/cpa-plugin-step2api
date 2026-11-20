@@ -32,6 +32,7 @@ type StreamTranslator struct {
 	completedToolCalls int
 	suppressed         map[int]string
 	mappedBuiltin      map[int]string
+	toolIds            map[int]string
 	dropped            []string
 	cutReason          string
 }
@@ -77,48 +78,131 @@ func (t *StreamTranslator) hasTool(name string) bool {
 
 // IsMappableBuiltin reports whether a built-in tool can be rewritten into a
 // declared client tool (argument parsing happens when deltas arrive).
+// MappedTarget reports the declared client tool that should receive a built-in
+// Studio tool call, if any.
+func MappedTarget(name string, tools []any) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "python", "file_write", "file_read", "read_file", "document_parser":
+		if ToolDeclared(tools, "exec_command") {
+			return "exec_command", true
+		}
+	case "todo", "todos", "todo_write":
+		if ToolDeclared(tools, "update_plan") {
+			return "update_plan", true
+		}
+	}
+	return "", false
+}
+
+// IsMappableBuiltin reports whether a built-in tool can be rewritten into a
+// declared client tool (argument parsing happens when deltas arrive).
 func IsMappableBuiltin(name string, tools []any) bool {
-	return (strings.EqualFold(strings.TrimSpace(name), "python") || strings.EqualFold(strings.TrimSpace(name), "file_write")) && ToolDeclared(tools, "exec_command")
+	_, ok := MappedTarget(name, tools)
+	return ok
 }
 
 // MapBuiltinTool rewrites a Studio built-in tool call into an equivalent
 // client-declared tool call so the turn can continue instead of ending.
 func MapBuiltinTool(name, args string, tools []any) (string, string, bool) {
-	lname := strings.ToLower(strings.TrimSpace(name))
-	if !ToolDeclared(tools, "exec_command") {
+	target, ok := MappedTarget(name, tools)
+	if !ok {
 		return "", "", false
 	}
 	var payload map[string]any
 	if json.Unmarshal([]byte(args), &payload) != nil {
 		return "", "", false
 	}
-	encode := func(v string) string { return base64.StdEncoding.EncodeToString([]byte(v)) }
-	switch lname {
-	case "python":
-		code, _ := payload["code"].(string)
-		if strings.TrimSpace(code) == "" {
+	switch target {
+	case "exec_command":
+		cmd, okCmd := builtinToCommand(strings.ToLower(strings.TrimSpace(name)), payload)
+		if !okCmd {
 			return "", "", false
 		}
-		cmd := "$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encode(code) + "')); $c | python -"
 		out, err := json.Marshal(map[string]any{"cmd": cmd})
-		return "exec_command", string(out), err == nil
-	case "file_write":
-		path, _ := payload["path"].(string)
-		if path == "" {
-			path, _ = payload["file_path"].(string)
-		}
-		content, _ := payload["content"].(string)
-		if content == "" {
-			content, _ = payload["text"].(string)
-		}
-		if strings.TrimSpace(path) == "" || content == "" {
+		return target, string(out), err == nil
+	case "update_plan":
+		plan := builtinToPlan(payload)
+		if len(plan) == 0 {
 			return "", "", false
 		}
-		cmd := "$p=" + psQuote(path) + "; $c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encode(content) + "')); [IO.File]::WriteAllText($p,$c,(New-Object Text.UTF8Encoding($false)))"
-		out, err := json.Marshal(map[string]any{"cmd": cmd})
-		return "exec_command", string(out), err == nil
+		out, err := json.Marshal(map[string]any{"plan": plan})
+		return target, string(out), err == nil
 	}
 	return "", "", false
+}
+
+func builtinToCommand(name string, payload map[string]any) (string, bool) {
+	encode := func(v string) string { return base64.StdEncoding.EncodeToString([]byte(v)) }
+	switch name {
+	case "python":
+		code := firstString(payload, "code", "source", "script")
+		if strings.TrimSpace(code) == "" {
+			return "", false
+		}
+		return "$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encode(code) + "')); $c | python -", true
+	case "file_write":
+		path := firstString(payload, "path", "file_path", "filename", "file")
+		content := firstString(payload, "content", "text", "data")
+		if strings.TrimSpace(path) == "" {
+			return "", false
+		}
+		return "$p=" + psQuote(path) + "; $c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encode(content) + "')); [IO.File]::WriteAllText($p,$c,(New-Object Text.UTF8Encoding($false)))", true
+	default:
+		path := firstString(payload, "path", "file_path", "filename", "file")
+		if strings.TrimSpace(path) != "" {
+			return "Get-Content -LiteralPath " + psQuote(path) + " -Raw", true
+		}
+		if url := firstString(payload, "url", "link"); strings.TrimSpace(url) != "" {
+			return "Invoke-WebRequest -Uri " + psQuote(url) + " -UseBasicParsing | Select-Object -ExpandProperty Content", true
+		}
+	}
+	return "", false
+}
+
+func builtinToPlan(payload map[string]any) []map[string]any {
+	var items []any
+	for _, key := range []string{"todos", "items", "tasks", "plan", "steps"} {
+		if arr, ok := payload[key].([]any); ok {
+			items = arr
+			break
+		}
+	}
+	var plan []map[string]any
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		step := firstString(m, "step", "content", "title", "text", "task", "name")
+		if strings.TrimSpace(step) == "" {
+			continue
+		}
+		plan = append(plan, map[string]any{
+			"step":   step,
+			"status": normalizeTodoStatus(firstString(m, "status", "state")),
+		})
+	}
+	return plan
+}
+
+func normalizeTodoStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "complete", "done", "finished":
+		return "completed"
+	case "in_progress", "in-progress", "active", "doing", "running":
+		return "in_progress"
+	default:
+		return "pending"
+	}
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := m[key].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func psQuote(v string) string {
@@ -290,7 +374,9 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 					t.mappedBuiltin = map[int]string{}
 				}
 				t.mappedBuiltin[data.BlockIndex] = data.ToolName
-				data.ToolName = "exec_command"
+				if target, okTarget := MappedTarget(data.ToolName, t.tools); okTarget {
+					data.ToolName = target
+				}
 			} else {
 				delete(t.activeToolBlocks, data.BlockIndex)
 				if t.suppressed == nil {
@@ -305,7 +391,9 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 			t.activeToolBlocks = map[int]bool{}
 		}
 		t.activeToolBlocks[data.BlockIndex] = true
-		t.hasToolCalls = true
+		if _, isMapped := t.mappedBuiltin[data.BlockIndex]; !isMapped {
+			t.hasToolCalls = true
+		}
 		t.textBuffer.Reset()
 		t.bufferText = false
 		t.ensureToolBuffers()
@@ -321,20 +409,26 @@ func (t *StreamTranslator) TranslateEvent(ev stepstudio.StudioEvent) [][]byte {
 		t.toolBuffers[data.BlockIndex] = &strings.Builder{}
 		t.toolBuffers[data.BlockIndex].WriteString(data.ArgumentsJSON)
 		t.toolNames[data.BlockIndex] = data.ToolName
-		frame := t.makeDeltaChunk(map[string]any{
-			"tool_calls": []map[string]any{
-				{
-					"index": openAIIndex,
-					"id":    data.ToolCallID,
-					"type":  "function",
-					"function": map[string]any{
-						"name":      data.ToolName,
-						"arguments": "",
+		if t.toolIds == nil {
+			t.toolIds = map[int]string{}
+		}
+		t.toolIds[data.BlockIndex] = data.ToolCallID
+		if _, isMapped := t.mappedBuiltin[data.BlockIndex]; !isMapped {
+			frame := t.makeDeltaChunk(map[string]any{
+				"tool_calls": []map[string]any{
+					{
+						"index": openAIIndex,
+						"id":    data.ToolCallID,
+						"type":  "function",
+						"function": map[string]any{
+							"name":      data.ToolName,
+							"arguments": "",
+						},
 					},
 				},
-			},
-		}, nil, nil)
-		out = append(out, frame)
+			}, nil, nil)
+			out = append(out, frame)
+		}
 
 	case stepstudio.EventToolCallDelta:
 		var data stepstudio.ToolCallDeltaData
@@ -517,29 +611,37 @@ func (t *StreamTranslator) flushToolBuffer(blockIndex int) [][]byte {
 	}
 	delete(t.toolBuffers, blockIndex)
 	rawArgs := buffer.String()
+	mapped := false
 	if original, okMap := t.mappedBuiltin[blockIndex]; okMap {
-		if _, mappedArgs, okConv := MapBuiltinTool(original, rawArgs, t.tools); okConv {
-			rawArgs = mappedArgs
+		_, mappedArgs, okConv := MapBuiltinTool(original, rawArgs, t.tools)
+		if !okConv {
+			t.dropped = append(t.dropped, original)
+			return nil
 		}
+		rawArgs = mappedArgs
+		mapped = true
 	}
 	arguments := NormalizeToolArguments(t.toolNames[blockIndex], rawArgs, t.tools)
 	if strings.TrimSpace(arguments) == "" {
 		arguments = "{}"
 	}
 	openAIIndex := blockIndex
-	if mapped, exists := t.toolIndices[blockIndex]; exists {
-		openAIIndex = mapped
+	if idx, exists := t.toolIndices[blockIndex]; exists {
+		openAIIndex = idx
 	}
-	return [][]byte{t.makeDeltaChunk(map[string]any{
-		"tool_calls": []map[string]any{
-			{
-				"index": openAIIndex,
-				"function": map[string]any{
-					"arguments": arguments,
-				},
-			},
+	call := map[string]any{
+		"index": openAIIndex,
+		"function": map[string]any{
+			"arguments": arguments,
 		},
-	}, nil, nil)}
+	}
+	if mapped {
+		call["id"] = t.toolIds[blockIndex]
+		call["type"] = "function"
+		call["function"].(map[string]any)["name"] = t.toolNames[blockIndex]
+		t.hasToolCalls = true
+	}
+	return [][]byte{t.makeDeltaChunk(map[string]any{"tool_calls": []map[string]any{call}}, nil, nil)}
 }
 
 func (t *StreamTranslator) flushAllToolBuffers() [][]byte {
