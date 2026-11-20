@@ -31,9 +31,25 @@ const (
 	// Draining remaining Studio events until "done" takes ~1.5s for rejected
 	// client tool calls and avoids leaking Studio's 5-slot Redis concurrency
 	// counter. Cap background drain at 20s for slow sandbox calls.
-	upstreamBackgroundDrainTimeout = 20 * time.Second
+	upstreamBackgroundDrainTimeout = 6 * time.Second
 )
 
+var studioSlots = make(chan struct{}, 2)
+
+func acquireStudioSlot(ctx context.Context) (func(), error) {
+	timer := time.NewTimer(45 * time.Second)
+	defer timer.Stop()
+	select {
+	case studioSlots <- struct{}{}:
+		return func() { <-studioSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		err := pluginabi.NewError("upstream_busy", "StepFun Studio 并发通道繁忙，请稍后重试", http.StatusServiceUnavailable)
+		err.Retryable = true
+		return nil, err
+	}
+}
 func dumpInvalidBodyDebug(model string, payloadBytes []byte, chatReq stepstudio.PlaygroundChatRequest) {
 	type dump struct {
 		Model      string `json:"model"`
@@ -617,9 +633,15 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		EnableWebSearch: extracted.EnableWebSearch,
 	}
 
+	releaseSlot, slotErr := acquireStudioSlot(ctx)
+	if slotErr != nil {
+		cancel()
+		return nil, slotErr
+	}
 	eventsCh, errCh, err := startPlaygroundWithFallback(ctx, client, convID, req.Model, req.Payload, chatReq, extracted)
 	if err != nil {
 		cancel()
+		releaseSlot()
 		if !isConcurrencyLimitError(err) {
 			p.noteStudioUpstreamFailure(cleanModel, err)
 		}
@@ -638,6 +660,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	trans.SetTools(extracted.Tools)
 
 	go func() {
+		defer releaseSlot()
 		earlyCut := false
 		defer func() {
 			if !earlyCut {
@@ -650,7 +673,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 				_ = p.emitStreamChunk(streamID, chunk)
 			}
 			if trans.CutDue() {
-				usage := drainForUsage(eventsCh, errCh, 6*time.Second)
+				usage := drainForUsage(eventsCh, errCh, 4*time.Second)
 				for _, chunk := range trans.FinalChunks(trans.CutReason(), translator.UsageMap(usage)) {
 					_ = p.emitStreamChunk(streamID, chunk)
 				}
@@ -747,6 +770,11 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		EnableWebSearch: extracted.EnableWebSearch,
 	}
 
+	releaseSlot, slotErr := acquireStudioSlot(ctx)
+	if slotErr != nil {
+		return nil, slotErr
+	}
+	defer releaseSlot()
 	eventsCh, errCh, err := startPlaygroundWithFallback(ctx, client, convID, req.Model, req.Payload, chatReq, extracted)
 	if err != nil {
 		if !isConcurrencyLimitError(err) {
