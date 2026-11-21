@@ -64,7 +64,7 @@ func TestSplitModelAndEffortSuffixAndErrorClassification(t *testing.T) {
 		t.Fatal("expected concurrency error detection")
 	}
 	pErr := pluginErrorFromUpstreamErr(concErr)
-	if pErr == nil || pErr.HTTPStatus != 503 || !pErr.Retryable || strings.Contains(pErr.Message, "额度") {
+	if pErr == nil || pErr.HTTPStatus != 429 || strings.Contains(pErr.Message, "额度") {
 		t.Fatalf("concurrency error must return 503 without quota keyword: %+v", pErr)
 	}
 

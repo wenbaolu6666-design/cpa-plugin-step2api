@@ -37,7 +37,7 @@ const (
 var studioSlots = make(chan struct{}, 2)
 
 func acquireStudioSlot(ctx context.Context) (func(), error) {
-	timer := time.NewTimer(45 * time.Second)
+	timer := time.NewTimer(3 * time.Second)
 	defer timer.Stop()
 	select {
 	case studioSlots <- struct{}{}:
@@ -45,7 +45,7 @@ func acquireStudioSlot(ctx context.Context) (func(), error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-timer.C:
-		err := pluginabi.NewError("upstream_busy", "StepFun Studio 并发通道繁忙，请稍后重试", http.StatusServiceUnavailable)
+		err := pluginabi.NewError("upstream_concurrency", "StepFun Studio 并发已满，请切换其他模型或稍后重试", http.StatusTooManyRequests)
 		err.Retryable = true
 		return nil, err
 	}
@@ -357,9 +357,7 @@ func pluginErrorFromUpstreamErr(err error) *pluginabi.Error {
 	if isConcurrencyLimitError(err) {
 		// Return 503 without quota keywords so CPA Core does not place the
 		// Studio credential into a long quota cooldown on transient burst traffic.
-		busyErr := pluginabi.NewError("upstream_busy", "StepFun Studio 并发通道繁忙 ("+apiErr.Message+")，请稍后重试", http.StatusServiceUnavailable)
-		busyErr.Retryable = true
-		return busyErr
+		return pluginabi.NewError("upstream_concurrency", "StepFun Studio 并发已满（"+apiErr.Message+"），请切换其他模型或稍后重试", http.StatusTooManyRequests)
 	}
 	if status == http.StatusTooManyRequests {
 		return pluginabi.NewError("upstream_rate_limited", "StepFun 上游限流: "+apiErr.Message, http.StatusTooManyRequests)
@@ -519,19 +517,9 @@ func streamWithConcurrencyRetry(
 	convID string,
 	req stepstudio.PlaygroundChatRequest,
 ) (<-chan stepstudio.StudioEvent, <-chan error, error) {
-	waits := []time.Duration{1500 * time.Millisecond, 2500 * time.Millisecond, 4 * time.Second, 6 * time.Second}
-	eventsCh, errCh, err := client.StreamPlayground(ctx, convID, req)
-	for i := 0; err != nil && isConcurrencyLimitError(err) && i < len(waits); i++ {
-		timer := time.NewTimer(waits[i])
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, nil, ctx.Err()
-		case <-timer.C:
-		}
-		eventsCh, errCh, err = client.StreamPlayground(ctx, convID, req)
-	}
-	return eventsCh, errCh, err
+	// Concurrency exhaustion is reported to the caller immediately so the user
+	// can switch models instead of waiting through hidden retries.
+	return client.StreamPlayground(ctx, convID, req)
 }
 
 func startPlaygroundWithFallback(
