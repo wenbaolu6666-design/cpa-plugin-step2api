@@ -108,8 +108,8 @@ func MapBuiltinTool(name, args string, tools []any) (string, string, bool) {
 	if !ok {
 		return "", "", false
 	}
-	var payload map[string]any
-	if json.Unmarshal([]byte(args), &payload) != nil {
+	payload, ok := decodeToolPayload(args)
+	if !ok {
 		return "", "", false
 	}
 	switch target {
@@ -131,6 +131,123 @@ func MapBuiltinTool(name, args string, tools []any) (string, string, bool) {
 	return "", "", false
 }
 
+// FallbackBuiltinTool turns an unusable built-in call into a harmless client
+// command that reports the problem back to the model. Keeping a tool call in
+// the turn prevents the client from stopping after a dropped built-in call.
+func FallbackBuiltinTool(name string, tools []any) (string, string, bool) {
+	if !ToolDeclared(tools, "exec_command") {
+		return "", "", false
+	}
+	message := fmt.Sprintf("Built-in tool %s is unavailable in this client. Retry with one of the declared tools.", strings.TrimSpace(name))
+	out, err := json.Marshal(map[string]any{"cmd": "echo " + psQuote(message)})
+	if err != nil {
+		return "", "", false
+	}
+	return "exec_command", string(out), true
+}
+
+func decodeToolPayload(raw string) (map[string]any, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, false
+	}
+	if payload, ok := decodeJSONObject(trimmed); ok {
+		return unwrapToolPayload(payload), true
+	}
+	var nested string
+	if json.Unmarshal([]byte(trimmed), &nested) == nil {
+		if payload, ok := decodeJSONObject(strings.TrimSpace(nested)); ok {
+			return unwrapToolPayload(payload), true
+		}
+	}
+	if snippet, ok := firstJSONObject(trimmed); ok {
+		if payload, ok := decodeJSONObject(snippet); ok {
+			return unwrapToolPayload(payload), true
+		}
+	}
+	return nil, false
+}
+
+func decodeJSONObject(raw string) (map[string]any, bool) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var payload map[string]any
+	if decoder.Decode(&payload) != nil || payload == nil {
+		return nil, false
+	}
+	var extra any
+	if decoder.Decode(&extra) == nil {
+		return nil, false
+	}
+	return payload, true
+}
+
+// firstJSONObject returns the first balanced JSON object in raw, tolerating
+// progress text or duplicate fragments appended by the upstream stream.
+func firstJSONObject(raw string) (string, bool) {
+	start := strings.IndexByte(raw, '{')
+	if start < 0 {
+		return "", false
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for index := start; index < len(raw); index++ {
+		char := raw[index]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch char {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch char {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return raw[start : index+1], true
+			}
+		}
+	}
+	return "", false
+}
+
+func unwrapToolPayload(payload map[string]any) map[string]any {
+	if hasToolArgument(payload) {
+		return payload
+	}
+	for _, key := range []string{"arguments", "params", "input", "payload"} {
+		switch typed := payload[key].(type) {
+		case map[string]any:
+			return typed
+		case string:
+			if parsed, ok := decodeJSONObject(strings.TrimSpace(typed)); ok {
+				return parsed
+			}
+		}
+	}
+	return payload
+}
+
+func hasToolArgument(payload map[string]any) bool {
+	for _, key := range []string{"path", "file_path", "filepath", "filename", "file", "content", "text", "data", "contents", "file_text", "todos", "items", "tasks", "plan", "steps", "list"} {
+		if _, ok := payload[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func builtinToCommand(name string, payload map[string]any) (string, bool) {
 	encode := func(v string) string { return base64.StdEncoding.EncodeToString([]byte(v)) }
 	switch name {
@@ -141,14 +258,14 @@ func builtinToCommand(name string, payload map[string]any) (string, bool) {
 		}
 		return "$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encode(code) + "')); $c | python -", true
 	case "file_write":
-		path := firstString(payload, "path", "file_path", "filename", "file")
-		content := firstString(payload, "content", "text", "data")
+		path := firstToolPath(payload)
+		content := firstText(payload, "content", "file_text", "text", "contents", "data", "body", "value", "new_str")
 		if strings.TrimSpace(path) == "" {
 			return "", false
 		}
 		return "$p=" + psQuote(path) + "; $c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encode(content) + "')); [IO.File]::WriteAllText($p,$c,(New-Object Text.UTF8Encoding($false)))", true
 	default:
-		path := firstString(payload, "path", "file_path", "filename", "file")
+		path := firstToolPath(payload)
 		if strings.TrimSpace(path) != "" {
 			return "Get-Content -LiteralPath " + psQuote(path) + " -Raw", true
 		}
@@ -215,6 +332,29 @@ func firstString(m map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if v, ok := m[key].(string); ok && strings.TrimSpace(v) != "" {
 			return v
+		}
+	}
+	return ""
+}
+
+func firstToolPath(m map[string]any) string {
+	return firstString(m, "path", "file_path", "filepath", "filename", "file", "target_path", "destination", "dst")
+}
+
+func firstText(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := m[key]
+		if !ok || value == nil {
+			continue
+		}
+		if text, ok := value.(string); ok {
+			if strings.TrimSpace(text) != "" {
+				return text
+			}
+			continue
+		}
+		if encoded, err := json.Marshal(value); err == nil {
+			return string(encoded)
 		}
 	}
 	return ""
@@ -584,7 +724,21 @@ func (t *StreamTranslator) FinalChunks(reason string, usage map[string]any) [][]
 				"tool_calls": []map[string]any{toolCall},
 			}, nil, nil))
 		} else if call, ok := ParseToolCallText(text); ok && call.Name != "" && !t.hasTool(call.Name) {
-			t.dropped = append(t.dropped, call.Name)
+			mappedName, mappedArgs, okMap := MapBuiltinTool(call.Name, call.Arguments, t.tools)
+			if !okMap {
+				mappedName, mappedArgs, okMap = FallbackBuiltinTool(call.Name, t.tools)
+			}
+			if !okMap {
+				t.dropped = append(t.dropped, call.Name)
+			} else {
+				t.hasToolCalls = true
+				toolCall := OpenAIToolCall(mappedName, mappedArgs)
+				toolCall["index"] = t.nextToolIdx
+				t.nextToolIdx++
+				out = append(out, t.makeDeltaChunk(map[string]any{
+					"tool_calls": []map[string]any{toolCall},
+				}, nil, nil))
+			}
 		} else {
 			out = append(out, t.makeDeltaChunk(map[string]any{"content": text}, nil, nil))
 		}
@@ -630,10 +784,16 @@ func (t *StreamTranslator) flushToolBuffer(blockIndex int) [][]byte {
 	if original, okMap := t.mappedBuiltin[blockIndex]; okMap {
 		_, mappedArgs, okConv := MapBuiltinTool(original, rawArgs, t.tools)
 		if !okConv {
-			t.dropped = append(t.dropped, original)
-			return nil
+			fallbackName, fallbackArgs, okFallback := FallbackBuiltinTool(original, t.tools)
+			if !okFallback {
+				t.dropped = append(t.dropped, original)
+				return nil
+			}
+			t.toolNames[blockIndex] = fallbackName
+			rawArgs = fallbackArgs
+		} else {
+			rawArgs = mappedArgs
 		}
-		rawArgs = mappedArgs
 		mapped = true
 	}
 	arguments := NormalizeToolArguments(t.toolNames[blockIndex], rawArgs, t.tools)

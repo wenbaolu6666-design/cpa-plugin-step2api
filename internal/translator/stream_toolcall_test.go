@@ -366,6 +366,82 @@ func TestMapBuiltinFileWriteToExecCommand(t *testing.T) {
 	}
 }
 
+func TestMapBuiltinFileWriteToleratesStreamJunk(t *testing.T) {
+	tools := []any{map[string]any{"type": "function", "function": map[string]any{"name": "exec_command"}}}
+	raw := "{\"path\":\"D:\\\\tmp\\\\cfg.json\",\"content\":\"{\\\"build\\\":{}}\"}\nWriting cfg.json"
+	name, args, ok := MapBuiltinTool("file_write", raw, tools)
+	if !ok || name != "exec_command" {
+		t.Fatalf("expected mapping around trailing text, got %q %q %v", name, args, ok)
+	}
+	if !strings.Contains(args, "cfg.json") {
+		t.Fatalf("path was lost: %s", args)
+	}
+}
+
+func TestMapBuiltinFileWriteAliasesAndDoubleEncodedArgs(t *testing.T) {
+	tools := []any{map[string]any{"type": "function", "function": map[string]any{"name": "exec_command"}}}
+	inner := `{"file_path":"C:\\tmp\\a.txt","file_text":"hello"}`
+	encoded, err := json.Marshal(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, args, ok := MapBuiltinTool("file_write", string(encoded), tools)
+	if !ok || name != "exec_command" {
+		t.Fatalf("expected double-encoded mapping, got %q %q %v", name, args, ok)
+	}
+	if !strings.Contains(args, "a.txt") || !strings.Contains(args, "aGVsbG8=") {
+		t.Fatalf("alias keys were lost: %s", args)
+	}
+}
+
+func TestFallbackBuiltinToolKeepsTurnAlive(t *testing.T) {
+	tools := []any{map[string]any{"type": "function", "function": map[string]any{"name": "exec_command"}}}
+	name, args, ok := FallbackBuiltinTool("document_parser", tools)
+	if !ok || name != "exec_command" || !strings.Contains(args, "document_parser") {
+		t.Fatalf("expected diagnostic fallback, got %q %q %v", name, args, ok)
+	}
+	if _, _, ok := FallbackBuiltinTool("document_parser", nil); ok {
+		t.Fatal("fallback must not be produced without exec_command")
+	}
+}
+
+func TestStreamTranslatorKeepsFileWriteWithJunkArgs(t *testing.T) {
+	tr := NewStreamTranslator("step-5-preview")
+	tr.SetTools([]any{map[string]any{"type": "function", "function": map[string]any{"name": "exec_command"}}})
+	start, _ := json.Marshal(map[string]any{"block_index": 0, "tool_call_id": "call_1", "tool_name": "file_write", "arguments_json": ""})
+	delta, _ := json.Marshal(map[string]any{"block_index": 0, "delta": `{"path":"C:\\tmp\\x.txt","content":"hi"}` + "\nWriting file"})
+	chunks := tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallStart, Data: json.RawMessage(start)})
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallDelta, Data: json.RawMessage(delta)})...)
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventContentBlockStop, Data: json.RawMessage(`{"block_index":0}`)})...)
+	var joined strings.Builder
+	for _, chunk := range chunks {
+		joined.Write(chunk)
+	}
+	all := joined.String()
+	if strings.Contains(all, `"name":"file_write"`) {
+		t.Fatalf("builtin file_write leaked: %s", all)
+	}
+	if !strings.Contains(all, `"name":"exec_command"`) || !strings.Contains(all, "x.txt") {
+		t.Fatalf("expected file_write to be mapped despite trailing text: %s", all)
+	}
+}
+
+func TestStreamTranslatorFallsBackWhenFileWriteArgsUnusable(t *testing.T) {
+	tr := NewStreamTranslator("step-5-preview")
+	tr.SetTools([]any{map[string]any{"type": "function", "function": map[string]any{"name": "exec_command"}}})
+	start, _ := json.Marshal(map[string]any{"block_index": 0, "tool_call_id": "call_2", "tool_name": "file_write", "arguments_json": `{"path":{},"content":"hi"}`})
+	chunks := tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventToolCallStart, Data: json.RawMessage(start)})
+	chunks = append(chunks, tr.TranslateEvent(stepstudio.StudioEvent{Type: stepstudio.EventContentBlockStop, Data: json.RawMessage(`{"block_index":0}`)})...)
+	var joined strings.Builder
+	for _, chunk := range chunks {
+		joined.Write(chunk)
+	}
+	all := joined.String()
+	if !strings.Contains(all, `"name":"exec_command"`) || !strings.Contains(all, "file_write") {
+		t.Fatalf("expected diagnostic fallback instead of dropping the turn: %s", all)
+	}
+}
+
 func TestMapBuiltinTodoToUpdatePlan(t *testing.T) {
 	tools := []any{map[string]any{"type": "function", "function": map[string]any{"name": "update_plan"}}}
 	name, args, ok := MapBuiltinTool("todo", `{"todos":[{"content":"读取文件","status":"done"},{"content":"写报告","status":"in_progress"}]}`, tools)
