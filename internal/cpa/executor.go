@@ -32,12 +32,18 @@ const (
 	// client tool calls and avoids leaking Studio's 5-slot Redis concurrency
 	// counter. Cap background drain at 20s for slow sandbox calls.
 	upstreamBackgroundDrainTimeout = 6 * time.Second
+	// A short internal wait lets a busy Studio slot free up before failing.
+	// CPA Core retries 429/503 for minutes, so this must end with 409.
+	concurrencyRetryBudget  = 12 * time.Second
+	concurrencyRetryInitial = 2 * time.Second
+	concurrencyRetryMax     = 4 * time.Second
+	studioSlotWait          = 8 * time.Second
 )
 
 var studioSlots = make(chan struct{}, 2)
 
 func acquireStudioSlot(ctx context.Context) (func(), error) {
-	timer := time.NewTimer(3 * time.Second)
+	timer := time.NewTimer(studioSlotWait)
 	defer timer.Stop()
 	select {
 	case studioSlots <- struct{}{}:
@@ -45,9 +51,7 @@ func acquireStudioSlot(ctx context.Context) (func(), error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-timer.C:
-		err := pluginabi.NewError("upstream_concurrency", "StepFun Studio 并发已满，请切换其他模型或稍后重试", http.StatusTooManyRequests)
-		err.Retryable = true
-		return nil, err
+		return nil, pluginabi.NewError("upstream_concurrency", "StepFun Studio 并发已满，请切换其他模型或稍后重试", http.StatusConflict)
 	}
 }
 func dumpInvalidBodyDebug(model string, payloadBytes []byte, chatReq stepstudio.PlaygroundChatRequest) {
@@ -355,9 +359,10 @@ func pluginErrorFromUpstreamErr(err error) *pluginabi.Error {
 		return safetyErr
 	}
 	if isConcurrencyLimitError(err) {
-		// Return 503 without quota keywords so CPA Core does not place the
-		// Studio credential into a long quota cooldown on transient burst traffic.
-		return pluginabi.NewError("upstream_concurrency", "StepFun Studio 并发已满（"+apiErr.Message+"），请切换其他模型或稍后重试", http.StatusTooManyRequests)
+		// 429/503 are retried by CPA Core for minutes (request-retry), which
+		// looks like a stalled request. 409 is outside the retry list and
+		// surfaces the concurrency message immediately.
+		return pluginabi.NewError("upstream_concurrency", "StepFun Studio 并发已满（"+apiErr.Message+"），请切换其他模型或稍后重试", http.StatusConflict)
 	}
 	if status == http.StatusTooManyRequests {
 		return pluginabi.NewError("upstream_rate_limited", "StepFun 上游限流: "+apiErr.Message, http.StatusTooManyRequests)
@@ -517,9 +522,35 @@ func streamWithConcurrencyRetry(
 	convID string,
 	req stepstudio.PlaygroundChatRequest,
 ) (<-chan stepstudio.StudioEvent, <-chan error, error) {
-	// Concurrency exhaustion is reported to the caller immediately so the user
-	// can switch models instead of waiting through hidden retries.
-	return client.StreamPlayground(ctx, convID, req)
+	deadline := time.Now().Add(concurrencyRetryBudget)
+	delay := concurrencyRetryInitial
+	for {
+		eventsCh, errCh, err := client.StreamPlayground(ctx, convID, req)
+		if err == nil || !isConcurrencyLimitError(err) {
+			return eventsCh, errCh, err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return eventsCh, errCh, err
+		}
+		wait := delay
+		if wait > remaining {
+			wait = remaining
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, nil, ctx.Err()
+		case <-timer.C:
+		}
+		if delay < concurrencyRetryMax {
+			delay *= 2
+			if delay > concurrencyRetryMax {
+				delay = concurrencyRetryMax
+			}
+		}
+	}
 }
 
 func startPlaygroundWithFallback(
@@ -905,7 +936,11 @@ eventLoop:
 	var toolCalls []map[string]any
 	for _, call := range nativeToolCalls {
 		if call.Name != "" && !translator.ToolDeclared(extracted.Tools, call.Name) {
-			if mappedName, mappedArgs, okMap := translator.MapBuiltinTool(call.Name, call.Args, extracted.Tools); okMap {
+			mappedName, mappedArgs, okMap := translator.MapBuiltinTool(call.Name, call.Args, extracted.Tools)
+			if !okMap {
+				mappedName, mappedArgs, okMap = translator.FallbackBuiltinTool(call.Name, extracted.Tools)
+			}
+			if okMap {
 				item := translator.OpenAIToolCall(mappedName, mappedArgs)
 				if call.ID != "" {
 					item["id"] = call.ID

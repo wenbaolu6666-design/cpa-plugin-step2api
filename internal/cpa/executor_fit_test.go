@@ -64,8 +64,8 @@ func TestSplitModelAndEffortSuffixAndErrorClassification(t *testing.T) {
 		t.Fatal("expected concurrency error detection")
 	}
 	pErr := pluginErrorFromUpstreamErr(concErr)
-	if pErr == nil || pErr.HTTPStatus != 429 || strings.Contains(pErr.Message, "额度") {
-		t.Fatalf("concurrency error must return 503 without quota keyword: %+v", pErr)
+	if pErr == nil || pErr.HTTPStatus != 409 || strings.Contains(pErr.Message, "额度") {
+		t.Fatalf("concurrency error must return 409 without quota keyword: %+v", pErr)
 	}
 
 	evCh := make(chan stepstudio.StudioEvent, 2)

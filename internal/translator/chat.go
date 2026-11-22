@@ -14,6 +14,7 @@ const ToolProtocolTemplate = `This session uses tools that are executed by the c
 Rules:
 - The only tools available in this session are the ones listed in "Available tools (JSON)" below.
 - When the task requires running commands, reading or writing local files (including Windows paths such as C:\ and D:\), or operating the desktop, call the matching listed client tool instead of explaining limitations.
+- Pass commands and scripts directly to the client command tool; do not wrap them in another shell layer such as pwsh or powershell -Command.
 - If you do not emit a native tool_call block, emit a single JSON object (without markdown fences) in this shape: {"name": "<tool_name>", "arguments": {<arguments>}}
 - The arguments field must be a JSON object; nested arrays, objects, numbers and booleans stay as native JSON values.
 - After emitting tool calls, stop and wait for the client to return tool results in the next turn.
