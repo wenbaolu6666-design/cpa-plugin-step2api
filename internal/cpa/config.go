@@ -10,7 +10,7 @@ const (
 	PluginID   = "step2api"
 	PluginName = "Step2API"
 	ProviderID = "step2api"
-	Version    = "1.0.56"
+	Version    = "1.0.57"
 )
 
 type PluginConfig struct {
@@ -26,6 +26,8 @@ type PluginConfig struct {
 	DefaultEffort         string `yaml:"default_effort"`
 	SyncAuthFiles         bool   `yaml:"sync_auth_files"`
 	DataDir               string `yaml:"data_dir"`
+	BrowserPath           string `yaml:"browser_path"`
+	LoginTimeoutSeconds   int    `yaml:"login_timeout_seconds"`
 }
 
 func DefaultPluginConfig() PluginConfig {
@@ -41,6 +43,7 @@ func DefaultPluginConfig() PluginConfig {
 		DefaultEffort:         "medium",
 		SyncAuthFiles:         true,
 		DataDir:               "~/.step2api",
+		LoginTimeoutSeconds:   300,
 	}
 }
 

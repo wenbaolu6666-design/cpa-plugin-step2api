@@ -256,6 +256,25 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		}, nil
 	}
 
+	// 2.9 Browser login: open an isolated incognito window and capture Oasis-Token automatically.
+	if strings.Contains(path, "/api/accounts/browser-login") {
+		if method == http.MethodPost && strings.Contains(path, "/cancel") {
+			session := p.CancelBrowserLogin()
+			res, _ := json.Marshal(map[string]any{"ok": true, "session": session})
+			return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
+		}
+		if method == http.MethodPost {
+			session, startErr := p.StartBrowserLogin()
+			if startErr != nil {
+				res, _ := json.Marshal(map[string]any{"ok": false, "error": startErr.Error()})
+				return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Headers: headers, Body: res}, nil
+			}
+			res, _ := json.Marshal(map[string]any{"ok": true, "session": session})
+			return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
+		}
+		res, _ := json.Marshal(map[string]any{"ok": true, "session": p.browserLoginSnapshot()})
+		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
+	}
 	// 3. POST /api/accounts (Add Account)
 	if (path == "/v0/management/step2api/api/accounts" || path == "/step2api/api/accounts" || path == "/api/accounts" || strings.HasSuffix(path, "/api/accounts")) && method == http.MethodPost {
 		var in struct {
@@ -281,48 +300,18 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			}, nil
 		}
 
-		accName := strings.TrimSpace(in.Name)
-		if accName == "" {
-			if webid != "" {
-				accName = "step-" + webid[:min(8, len(webid))]
-			} else {
-				dev := stepstudio.ExtractDeviceID(tok)
-				if dev != "" {
-					accName = "step-" + dev[:min(8, len(dev))]
-				} else {
-					accName = fmt.Sprintf("step-%d", time.Now().Unix()%10000)
-				}
-			}
+		payload, saveErr := saveStepFunAccount(oauthDir, in.Name, tok, webid)
+		if saveErr != nil {
+			errBody, _ := json.Marshal(map[string]any{"error": "写入凭据文件失败: " + saveErr.Error()})
+			return pluginapi.ManagementResponse{StatusCode: http.StatusInternalServerError, Headers: headers, Body: errBody}, nil
 		}
-
-		payload := AuthFilePayload{
-			Type:          "step2api",
-			Provider:      ProviderID,
-			OAuthProvider: ProviderID,
-			AccountID:     accName,
-			Name:          accName,
-			OasisToken:    tok,
-			WebID:         webid,
-			UpdatedAt:     time.Now().Format(time.RFC3339),
-		}
-		data, _ := json.MarshalIndent(payload, "", "  ")
-		filePath := filepath.Join(oauthDir, "step2api-"+accName+".json")
-		if err := os.WriteFile(filePath, data, 0644); err != nil {
-			return pluginapi.ManagementResponse{StatusCode: http.StatusInternalServerError, Headers: headers, Body: []byte("{\"error\":\"åå¥å­æ®æä»¶å¤±è´¥\"}")}, nil
-		}
-
-		p.loginStateMu.Lock()
-		for _, st := range p.loginStates {
-			st.Done = true
-			st.Account = &payload
-		}
-		p.loginStateMu.Unlock()
+		p.markLoginStateDone(&payload)
 
 		res, _ := json.Marshal(map[string]any{
 			"ok":      true,
-			"id":      accName,
+			"id":      payload.AccountID,
 			"account": payload,
-			"message": "è´¦å·å·²æåå¯¼å¥å¹¶ä¿å­è³ CPA oauth å­æ®ç®å½",
+			"message": "账号已成功导入并保存至 CPA oauth 凭据目录",
 		})
 		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
 	}
