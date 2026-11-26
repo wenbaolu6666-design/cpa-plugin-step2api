@@ -858,7 +858,7 @@ eventLoop:
 		case stepstudio.EventToolCallStart:
 			var d stepstudio.ToolCallStartData
 			if err := json.Unmarshal(ev.Data, &d); err == nil {
-				if d.ToolName != "" && !translator.ToolDeclared(extracted.Tools, d.ToolName) {
+				if d.ToolName != "" && !translator.ToolDeclared(extracted.Tools, d.ToolName) && !translator.IsMappableBuiltin(d.ToolName, extracted.Tools) {
 					delete(activeToolBlocks, d.BlockIndex)
 					suppressedBlocks[d.BlockIndex] = true
 					droppedTools = append(droppedTools, d.ToolName)
@@ -974,7 +974,7 @@ eventLoop:
 			}
 		}
 		finishReason = "stop"
-		notice := fmt.Sprintf("（上游尝试调用内置工具 %s，本环境没有这些工具，该调用已忽略。请改用当前会话声明的工具重试。）", strings.Join(unique, ", "))
+		notice := translator.DroppedBuiltinNotice(unique, extracted.Tools)
 		if strings.TrimSpace(content) != "" {
 			content = strings.TrimRight(content, "\r\n") + "\n\n" + notice
 		} else {

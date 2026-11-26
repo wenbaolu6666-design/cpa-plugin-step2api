@@ -1,7 +1,6 @@
 package translator
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -76,19 +75,16 @@ func (t *StreamTranslator) hasTool(name string) bool {
 	return ToolDeclared(t.tools, name)
 }
 
-// IsMappableBuiltin reports whether a built-in tool can be rewritten into a
-// declared client tool (argument parsing happens when deltas arrive).
 // MappedTarget reports the declared client tool that should receive a built-in
 // Studio tool call, if any.
 func MappedTarget(name string, tools []any) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "python", "file_write", "file_read", "read_file", "document_parser":
-		if ToolDeclared(tools, "exec_command") {
-			return "exec_command", true
-		}
-	case "todo", "todos", "todo_write":
-		if ToolDeclared(tools, "update_plan") {
-			return "update_plan", true
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if isPlanBuiltin(lower) {
+		return resolvePlanTarget(tools)
+	}
+	if isCommandBuiltin(lower) {
+		if target, ok := resolveCommandTarget(tools); ok {
+			return target.Name, true
 		}
 	}
 	return "", false
@@ -104,23 +100,16 @@ func IsMappableBuiltin(name string, tools []any) bool {
 // MapBuiltinTool rewrites a Studio built-in tool call into an equivalent
 // client-declared tool call so the turn can continue instead of ending.
 func MapBuiltinTool(name, args string, tools []any) (string, string, bool) {
-	target, ok := MappedTarget(name, tools)
-	if !ok {
-		return "", "", false
-	}
-	payload, ok := decodeToolPayload(args)
-	if !ok {
-		return "", "", false
-	}
-	switch target {
-	case "exec_command":
-		cmd, okCmd := builtinToCommand(strings.ToLower(strings.TrimSpace(name)), payload)
-		if !okCmd {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if isPlanBuiltin(lower) {
+		target, ok := resolvePlanTarget(tools)
+		if !ok {
 			return "", "", false
 		}
-		out, err := json.Marshal(map[string]any{"cmd": cmd})
-		return target, string(out), err == nil
-	case "update_plan":
+		payload, ok := decodeToolPayload(args)
+		if !ok {
+			return "", "", false
+		}
 		plan := builtinToPlan(payload)
 		if len(plan) == 0 {
 			return "", "", false
@@ -128,22 +117,39 @@ func MapBuiltinTool(name, args string, tools []any) (string, string, bool) {
 		out, err := json.Marshal(map[string]any{"plan": plan})
 		return target, string(out), err == nil
 	}
-	return "", "", false
+	if !isCommandBuiltin(lower) {
+		return "", "", false
+	}
+	target, ok := resolveCommandTarget(tools)
+	if !ok {
+		return "", "", false
+	}
+	payload, ok := decodeToolPayload(args)
+	if !ok {
+		return "", "", false
+	}
+	shellCommand, argv, okCmd := buildBuiltinInvocation(target, lower, payload)
+	if !okCmd {
+		return "", "", false
+	}
+	encoded, okArgs := encodeCommandArgs(target, shellCommand, argv)
+	return target.Name, encoded, okArgs
 }
 
 // FallbackBuiltinTool turns an unusable built-in call into a harmless client
 // command that reports the problem back to the model. Keeping a tool call in
 // the turn prevents the client from stopping after a dropped built-in call.
 func FallbackBuiltinTool(name string, tools []any) (string, string, bool) {
-	if !ToolDeclared(tools, "exec_command") {
+	target, ok := resolveCommandTarget(tools)
+	if !ok {
 		return "", "", false
 	}
-	message := fmt.Sprintf("Built-in tool %s is unavailable in this client. Retry with one of the declared tools.", strings.TrimSpace(name))
-	out, err := json.Marshal(map[string]any{"cmd": "echo " + psQuote(message)})
-	if err != nil {
+	shellCommand, argv, okCmd := buildFallbackInvocation(target, name)
+	if !okCmd {
 		return "", "", false
 	}
-	return "exec_command", string(out), true
+	encoded, okArgs := encodeCommandArgs(target, shellCommand, argv)
+	return target.Name, encoded, okArgs
 }
 
 func decodeToolPayload(raw string) (map[string]any, bool) {
@@ -246,34 +252,6 @@ func hasToolArgument(payload map[string]any) bool {
 		}
 	}
 	return false
-}
-
-func builtinToCommand(name string, payload map[string]any) (string, bool) {
-	encode := func(v string) string { return base64.StdEncoding.EncodeToString([]byte(v)) }
-	switch name {
-	case "python":
-		code := firstString(payload, "code", "source", "script")
-		if strings.TrimSpace(code) == "" {
-			return "", false
-		}
-		return "$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encode(code) + "')); $c | python -", true
-	case "file_write":
-		path := firstToolPath(payload)
-		content := firstText(payload, "content", "file_text", "text", "contents", "data", "body", "value", "new_str")
-		if strings.TrimSpace(path) == "" {
-			return "", false
-		}
-		return "$p=" + psQuote(path) + "; $c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encode(content) + "')); [IO.File]::WriteAllText($p,$c,(New-Object Text.UTF8Encoding($false)))", true
-	default:
-		path := firstToolPath(payload)
-		if strings.TrimSpace(path) != "" {
-			return "Get-Content -LiteralPath " + psQuote(path) + " -Raw", true
-		}
-		if url := firstString(payload, "url", "link"); strings.TrimSpace(url) != "" {
-			return "Invoke-WebRequest -Uri " + psQuote(url) + " -UseBasicParsing | Select-Object -ExpandProperty Content", true
-		}
-	}
-	return "", false
 }
 
 func builtinToPlan(payload map[string]any) []map[string]any {
@@ -754,7 +732,7 @@ func (t *StreamTranslator) FinalChunks(reason string, usage map[string]any) [][]
 			names = append(names, name)
 		}
 		if len(names) > 0 {
-			notice := fmt.Sprintf("（上游尝试调用内置工具 %s，本环境没有这些工具，该调用已忽略。请改用当前会话声明的工具重试。）", strings.Join(names, ", "))
+			notice := DroppedBuiltinNotice(names, t.tools)
 			if t.textStreamed {
 				notice = "\n\n" + notice
 			}

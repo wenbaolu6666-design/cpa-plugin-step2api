@@ -2,6 +2,21 @@
 
 这里记录每个发布版本的主要变化。写法以使用者能看懂为准：先说明会影响什么，再说明是否需要升级，不堆内部代码术语。
 
+## v1.0.56（2026-11-26）
+
+**建议升级：在 Codex 以外的客户端（Claude Code、Cline/Roo、Cursor、Cherry Studio 等）里用 Step 模型，被提示“上游调用了内置工具 python … 没有这些工具”的用户。**
+
+### 本次更新
+
+- 内置工具改写不再只认 Codex 的 `exec_command`：现在会按客户端实际声明的命令工具自动适配 `bash` / `shell` / `execute_command` / `run_command` / `run_terminal_cmd` / `terminal` 等名称，并按对方的参数名（`command`、`cmd`、`script`、`code`）和参数形态（字符串或数组）填充。
+- 没有匹配到已知名称时，会读取工具描述与参数结构，识别“能执行命令”的工具后再改写，避免自定义 MCP 工具被漏掉。
+- 非 Codex 客户端改用跨 shell 的 Python 调用方式（cmd / PowerShell / bash 都能执行），不再依赖 PowerShell 专用写法。
+- 待办类内置工具同样支持 `todo_write` / `write_todos` / `update_todos` 等别名。
+- 仍无法改写时，提示会直接列出当前客户端声明了哪些工具，方便判断是客户端没启用命令工具，还是需要补充适配。
+
+### 是否需要升级
+
+- 只在 Codex 里用、且一切正常的用户可以暂不升级；在外部客户端遇到“内置工具 python 不可用”的用户建议升级。
 ## v1.0.55（2026-11-22）
 
 **建议升级：希望并发满时先短等、而不是立刻失败的用户。**
