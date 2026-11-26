@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -135,21 +133,17 @@ func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
 	p.loginStateMu.Unlock()
 
 	loginURL := fmt.Sprintf("http://127.0.0.1:8317/v0/resource/plugins/step2api/accounts?state=%s", stateID)
-	metadata := map[string]any{"mode": "browser-isolated"}
-	session, startErr := p.StartBrowserLogin()
-	if startErr != nil {
-		metadata["error"] = startErr.Error()
-		metadata["hint"] = "未能自动打开浏览器，请在账号页粘贴 StepFun Cookie 或 Oasis-Token"
-	} else if session != nil {
-		metadata["browser_login"] = session
-		metadata["hint"] = "已打开独立无痕窗口，登录后会自动写入账号"
-	}
+	// OAuth 入口本身不弹窗：按规范只返回账号页地址，由用户在该页点击
+	// 「官方登录（无痕窗口）」或「添加账号」时才启动浏览器。
 	return pluginapi.AuthLoginStartResponse{
 		Provider:  ProviderID,
 		URL:       loginURL,
 		State:     stateID,
 		ExpiresAt: time.Now().Add(15 * time.Minute),
-		Metadata:  metadata,
+		Metadata: map[string]any{
+			"mode": "panel",
+			"hint": "在账号页点击「官方登录（无痕窗口）」开始授权",
+		},
 	}, nil
 }
 
@@ -189,33 +183,22 @@ func (p *Plugin) handleAuthLoginPoll(raw []byte) (any, error) {
 		}, nil
 	}
 
-	// Also check if any auth file was written to oauth dir
-	oauthDir := resolveOAuthDir()
-	if files, err := filepath.Glob(filepath.Join(oauthDir, "step2api-*.json")); err == nil && len(files) > 0 {
-		latest := files[len(files)-1]
-		if data, err := os.ReadFile(latest); err == nil {
-			var item AuthFilePayload
-			if err := json.Unmarshal(data, &item); err == nil && item.OasisToken != "" {
-				return pluginapi.AuthLoginPollResponse{
-					Status:  pluginapi.AuthLoginStatusSuccess,
-					Message: "StepFun 凭据已成功加载: " + item.AccountID,
-					Auth: pluginapi.AuthData{
-						Provider: ProviderID,
-						ID:       item.AccountID,
-						Label:    "StepFun Studio (" + item.AccountID + ")",
-						Metadata: map[string]any{
-							"account_id":     item.AccountID,
-							"oasis_token":    item.OasisToken,
-							"web_id":         item.WebID,
-							"oauth_provider": ProviderID,
-							"auth_kind":      "oauth",
-						},
-					},
-				}, nil
-			}
+	// 只有本轮登录真正完成才算成功：历史账号文件存在不代表本次登录成功，
+	// 否则控制台会一直显示“已完成”而不是“已有 N 个账号”。
+	if current := p.browserLoginSnapshot(); current != nil && current.StartedAt.After(session.CreatedAt) {
+		switch current.Status {
+		case browserLoginError:
+			return pluginapi.AuthLoginPollResponse{
+				Status:  pluginapi.AuthLoginStatusError,
+				Message: current.Message,
+			}, nil
+		case browserLoginCancelled:
+			return pluginapi.AuthLoginPollResponse{
+				Status:  pluginapi.AuthLoginStatusError,
+				Message: "登录已取消",
+			}, nil
 		}
 	}
-
 	return pluginapi.AuthLoginPollResponse{
 		Status:  pluginapi.AuthLoginStatusPending,
 		Message: "等待导入 Cookie 或 Oasis-Token...",
