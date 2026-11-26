@@ -57,7 +57,7 @@ func (p *Plugin) handleAuthIdentifier() (any, error) {
 			{
 				Identifier: ProviderID,
 				Name:       "Step2API",
-				Logo:       "https://www.stepfun.com/step_favicon.svg",
+				Logo:       "https://raw.githubusercontent.com/wenbaolu6666-design/cpa-plugin-step2api/main/assets/logo.png",
 			},
 		},
 	}, nil
