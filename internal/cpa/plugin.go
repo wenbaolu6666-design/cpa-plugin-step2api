@@ -53,6 +53,10 @@ type Plugin struct {
 	blockedUntil map[string]time.Time
 	tokenCacheMu sync.RWMutex
 	tokenCache   map[string]string
+
+	browserLoginMu     sync.Mutex
+	browserLogin       *BrowserLoginSession
+	browserLoginCancel context.CancelFunc
 }
 
 func NewPlugin(hostCall HostCallFunc) *Plugin {

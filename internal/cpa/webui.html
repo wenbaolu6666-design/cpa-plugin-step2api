@@ -101,6 +101,10 @@
         <th>Tokens in / out</th><th>操作</th>
       </tr></thead><tbody id="accounts"></tbody></table>
       <div style="height:14px"></div>
+      <div class="actions" style="margin-bottom:10px">
+        <button class="primary" id="btn-browser-login">官方登录（无痕窗口）</button>
+        <span class="sub" id="browser-login-status"></span>
+      </div>
       <div class="row3">
         <div><label>名称</label><input id="acct-name" placeholder="可留空自动命名"></div>
         <div><label>Oasis-Webid</label><input id="acct-webid" placeholder="可留空，从 token 解析"></div>
@@ -469,6 +473,53 @@ $("btn-add-account").onclick = async () => {
     btn.textContent = "添加账号";
   }
 };
+
+let browserLoginTimer = null;
+async function pollBrowserLogin() {
+  try {
+    const r = await api("/v0/management/step2api/api/accounts/browser-login", {method: "GET"});
+    const s = r.session;
+    const el = $("browser-login-status");
+    if (!s) { if (el) el.textContent = ""; return; }
+    const cookieHint = (s.cookies && s.cookies.length) ? `（已检测到 ${s.cookies.length} 个 StepFun Cookie）` : "";
+    if (el) el.textContent = (s.message || s.status) + cookieHint;
+    const btn = $("btn-browser-login");
+    if (s.status === "success") {
+      clearInterval(browserLoginTimer); browserLoginTimer = null;
+      if (btn) { btn.disabled = false; btn.textContent = "官方登录（无痕窗口）"; }
+      toast(s.message || "登录成功，账号已自动保存");
+      await refresh();
+    } else if (s.status === "error" || s.status === "cancelled") {
+      clearInterval(browserLoginTimer); browserLoginTimer = null;
+      if (btn) { btn.disabled = false; btn.textContent = "官方登录（无痕窗口）"; }
+      toast(s.message || "登录未完成", true);
+    }
+  } catch (e) { /* transient polling errors are ignored */ }
+}
+
+$("btn-browser-login").onclick = async () => {
+  const btn = $("btn-browser-login");
+  btn.disabled = true;
+  btn.textContent = "正在打开无痕窗口...";
+  try {
+    const r = await api("/v0/management/step2api/api/accounts/browser-login", {method: "POST", body: "{}"});
+    if (r.ok === false) throw new Error(r.error || "启动登录窗口失败");
+    btn.textContent = "等待窗口内登录...";
+    const el = $("browser-login-status");
+    if (el) el.textContent = "已打开独立无痕窗口，请在新窗口完成 StepFun 登录；登录成功后账号会自动写入。";
+    clearInterval(browserLoginTimer);
+    browserLoginTimer = setInterval(pollBrowserLogin, 1200);
+    pollBrowserLogin();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "官方登录（无痕窗口）";
+    toast("打开登录窗口失败: " + e.message, true);
+  }
+};
+
+if (new URLSearchParams(location.search).get("state")) {
+  browserLoginTimer = setInterval(pollBrowserLogin, 1200);
+}
 
 $("btn-export").onclick = async () => {
   try {

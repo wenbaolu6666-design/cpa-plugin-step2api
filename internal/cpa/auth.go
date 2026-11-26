@@ -135,11 +135,21 @@ func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
 	p.loginStateMu.Unlock()
 
 	loginURL := fmt.Sprintf("http://127.0.0.1:8317/v0/resource/plugins/step2api/accounts?state=%s", stateID)
+	metadata := map[string]any{"mode": "browser-isolated"}
+	session, startErr := p.StartBrowserLogin()
+	if startErr != nil {
+		metadata["error"] = startErr.Error()
+		metadata["hint"] = "未能自动打开浏览器，请在账号页粘贴 StepFun Cookie 或 Oasis-Token"
+	} else if session != nil {
+		metadata["browser_login"] = session
+		metadata["hint"] = "已打开独立无痕窗口，登录后会自动写入账号"
+	}
 	return pluginapi.AuthLoginStartResponse{
 		Provider:  ProviderID,
 		URL:       loginURL,
 		State:     stateID,
 		ExpiresAt: time.Now().Add(15 * time.Minute),
+		Metadata:  metadata,
 	}, nil
 }
 
