@@ -1,9 +1,12 @@
 package cpa
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/WenPaul/cpa-plugin-step2api/internal/pluginapi"
 )
 
 func TestPickStepFunCookies(t *testing.T) {
@@ -53,5 +56,50 @@ func TestSaveStepFunAccount(t *testing.T) {
 func TestSaveStepFunAccountRejectsEmptyToken(t *testing.T) {
 	if _, err := saveStepFunAccount(t.TempDir(), "", "  ", ""); err == nil {
 		t.Fatal("expected error for empty token")
+	}
+}
+
+// TestAuthLoginPollIgnoresExistingAccounts guards the console badge: an auth
+// file from an earlier login must not make a fresh OAuth flow report success.
+func TestAuthLoginPollIgnoresExistingAccounts(t *testing.T) {
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	if err := os.Chdir(workDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldDir)
+
+	if err := os.MkdirAll(filepath.Join("oauth"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existing := []byte(`{"type":"step2api","account_id":"old","oasis_token":"eyJhbGciOiJIUzI1NiJ9.eyJkZXZpY2VfaWQiOiJvbGQifQ.sig...refresh"}`)
+	if err := os.WriteFile(filepath.Join("oauth", "step2api-old.json"), existing, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plugin := NewPlugin(nil)
+	started, err := plugin.handleAuthLoginStart(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startResponse, ok := started.(pluginapi.AuthLoginStartResponse)
+	if !ok || startResponse.State == "" {
+		t.Fatalf("unexpected start response %#v", started)
+	}
+
+	pollRaw, _ := json.Marshal(map[string]any{"state": startResponse.State})
+	polled, err := plugin.handleAuthLoginPoll(pollRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pollResponse, ok := polled.(pluginapi.AuthLoginPollResponse)
+	if !ok {
+		t.Fatalf("unexpected poll response %#v", polled)
+	}
+	if pollResponse.Status != pluginapi.AuthLoginStatusPending {
+		t.Fatalf("status = %q, want pending", pollResponse.Status)
 	}
 }
