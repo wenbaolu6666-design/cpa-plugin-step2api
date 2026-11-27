@@ -301,7 +301,7 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			return pluginapi.ManagementResponse{
 				StatusCode: http.StatusBadRequest,
 				Headers:    headers,
-				Body:       []byte("{\"error\":\"æªæ£æµå°ææç Oasis-Tokenï¼¨è¯·ç¡®ä¿ä» F12 è¯·æ±å¤´ä¸­å¤å¶äºå®æ´ç Cookie æ Oasis-Token å­ç¬¦ä¸²\"}"),
+				Body:       []byte("{\"error\":\"未检测到有效的 Oasis-Token（请确保从 F12 请求头中复制了完整的 Cookie 或 Oasis-Token 字符串）\"}"),
 			}, nil
 		}
 
@@ -374,7 +374,7 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			filePath := filepath.Join(oauthDir, "step2api-"+accID+".json")
 			_ = os.Remove(filePath)
 		}
-		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: []byte("{\"ok\":true,\"message\":\"è´¦å·å·²å é¤\"}")}, nil
+		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: []byte("{\"ok\":true,\"message\":\"账号已删除\"}")}, nil
 	}
 
 	// 5. POST /api/accounts/refresh
@@ -430,7 +430,7 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		return pluginapi.ManagementResponse{
 			StatusCode: http.StatusOK,
 			Headers:    headers,
-			Body:       []byte("{\"ok\":true,\"message\":\"å·²åæ­¥è´¦å·è³ CPA å­æ®\"}"),
+			Body:       []byte("{\"ok\":true,\"message\":\"已同步账号至 CPA 凭据\"}"),
 		}, nil
 	}
 
