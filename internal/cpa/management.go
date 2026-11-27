@@ -67,6 +67,9 @@ func (p *Plugin) handleManagementRegister(raw []byte) (any, error) {
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/refresh", Description: "Refresh all StepFun account tokens"},
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/disable", Description: "Disable or enable StepFun account"},
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/sync", Description: "Sync StepFun accounts to host auths"},
+			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/browser-login", Description: "Start isolated browser login"},
+			{Method: http.MethodGet, Path: "/v0/management/step2api/api/accounts/browser-login", Description: "Get isolated browser login status"},
+			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/browser-login/cancel", Description: "Cancel isolated browser login"},
 		},
 		Resources: []pluginapi.ResourceRoute{
 			{
