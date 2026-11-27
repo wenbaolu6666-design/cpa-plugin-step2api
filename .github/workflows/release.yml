@@ -16,6 +16,7 @@ permissions:
 
 env:
   PLUGIN_ID: step2api
+  LLVM_MINGW_VERSION: "20261117"
 
 jobs:
   build:
@@ -45,6 +46,10 @@ jobs:
             goarch: amd64
             os: ubuntu-24.04
             ext: .dll
+          - goos: windows
+            goarch: arm64
+            os: ubuntu-24.04
+            ext: .dll
 
     steps:
       - name: Checkout
@@ -61,6 +66,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 zip
+
+      - name: Install LLVM-MinGW for Windows arm64
+        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
+        run: |
+          curl -fsSL -o /tmp/llvm-mingw.tar.xz "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz"
+          sudo mkdir -p /opt/llvm-mingw
+          sudo tar -xJf /tmp/llvm-mingw.tar.xz -C /opt/llvm-mingw --strip-components=1
+          /opt/llvm-mingw/bin/aarch64-w64-mingw32-gcc --version
 
       - name: Determine Version
         id: ver
@@ -90,6 +103,9 @@ jobs:
             export CGO_LDFLAGS="-mmacosx-version-min=13.0 -arch ${{ matrix.goarch == 'amd64' && 'x86_64' || 'arm64' }}"
           elif [ "${{ matrix.goos }}" = "linux" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
             export CC="aarch64-linux-gnu-gcc"
+          elif [ "${{ matrix.goos }}" = "windows" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
+            export PATH="/opt/llvm-mingw/bin:$PATH"
+            export CC="aarch64-w64-mingw32-gcc"
           elif [ "${{ matrix.goos }}" = "windows" ]; then
             export CC="x86_64-w64-mingw32-gcc"
           fi

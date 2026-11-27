@@ -10,7 +10,7 @@ const (
 	PluginID   = "step2api"
 	PluginName = "Step2API"
 	ProviderID = "step2api"
-	Version    = "1.0.61"
+	Version    = "1.0.62"
 )
 
 type PluginConfig struct {

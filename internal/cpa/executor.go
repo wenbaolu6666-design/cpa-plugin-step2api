@@ -54,32 +54,6 @@ func acquireStudioSlot(ctx context.Context) (func(), error) {
 		return nil, pluginabi.NewError("upstream_concurrency", "StepFun Studio 并发已满，请切换其他模型或稍后重试", http.StatusConflict)
 	}
 }
-func dumpInvalidBodyDebug(model string, payloadBytes []byte, chatReq stepstudio.PlaygroundChatRequest) {
-	type dump struct {
-		Model      string `json:"model"`
-		PayloadLen int    `json:"payload_len"`
-		Payload    string `json:"payload"`
-		Content    string `json:"content"`
-		System     string `json:"system_prompt"`
-	}
-	payload := string(payloadBytes)
-	if len(payload) > 200000 {
-		payload = translator.TruncateUTF8Head(payload, 200000)
-	}
-	out := dump{
-		Model:      model,
-		PayloadLen: len(payloadBytes),
-		Payload:    payload,
-		Content:    chatReq.Content,
-		System:     chatReq.SystemPrompt,
-	}
-	raw, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(filepath.Join(os.TempDir(), "step2api-invalid-body.json"), raw, 0o644)
-}
-
 func isInvalidBodyError(err error) bool {
 	apiErr, ok := err.(*stepstudio.APIError)
 	if !ok || apiErr == nil {
@@ -583,7 +557,6 @@ func startPlaygroundWithFallback(
 		}
 	}
 	if err != nil && isInvalidBodyError(err) {
-		dumpInvalidBodyDebug(rawModel, rawPayload, fitted)
 		retryReq := baseReq
 		retryReq.EnableWebSearch = false
 		retryReq = fitPlaygroundChatRequest(convID, retryReq, extracted.BaseSystem, extracted.ToolProtocol, 450*1024)
