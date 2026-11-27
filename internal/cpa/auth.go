@@ -21,6 +21,7 @@ type AuthFilePayload struct {
 	Phone          string   `json:"phone,omitempty"`
 	OasisToken     string   `json:"oasis_token,omitempty"`
 	WebID          string   `json:"web_id,omitempty"`
+	Note           string   `json:"note,omitempty"`
 	Disabled       bool     `json:"disabled,omitempty"`
 	ExcludedModels []string `json:"excluded_models,omitempty"`
 	UpdatedAt      string   `json:"updated_at,omitempty"`
@@ -103,6 +104,9 @@ func (p *Plugin) handleAuthParse(raw []byte) (any, error) {
 		"oauth_provider": ProviderID,
 		"auth_kind":      "oauth",
 	}
+	if note := strings.TrimSpace(payload.Note); note != "" {
+		metadata["note"] = note
+	}
 
 	return pluginapi.AuthParseResponse{
 		Handled: true,
@@ -116,6 +120,13 @@ func (p *Plugin) handleAuthParse(raw []byte) (any, error) {
 			},
 		},
 	}, nil
+}
+
+func withNote(metadata map[string]any, note string) map[string]any {
+	if strings.TrimSpace(note) != "" {
+		metadata["note"] = strings.TrimSpace(note)
+	}
+	return metadata
 }
 
 func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
@@ -172,13 +183,13 @@ func (p *Plugin) handleAuthLoginPoll(raw []byte) (any, error) {
 				Provider: ProviderID,
 				ID:       session.Account.AccountID,
 				Label:    "StepFun Studio (" + session.Account.AccountID + ")",
-				Metadata: map[string]any{
+				Metadata: withNote(map[string]any{
 					"account_id":     session.Account.AccountID,
 					"oasis_token":    session.Account.OasisToken,
 					"web_id":         session.Account.WebID,
 					"oauth_provider": ProviderID,
 					"auth_kind":      "oauth",
-				},
+				}, session.Account.Note),
 			},
 		}, nil
 	}

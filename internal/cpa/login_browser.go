@@ -613,8 +613,30 @@ func saveStepFunAccount(oauthDir, name, token, webid string) (AuthFilePayload, e
 		WebID:         webid,
 		UpdatedAt:     time.Now().Format(time.RFC3339),
 	}
-	data, _ := json.MarshalIndent(payload, "", "  ")
 	filePath := filepath.Join(oauthDir, "step2api-"+accName+".json")
+	// Re-login and re-import must keep user-owned fields such as note/tags/prefix.
+	if existing, errRead := os.ReadFile(filePath); errRead == nil {
+		var fields map[string]any
+		if json.Unmarshal(existing, &fields) == nil && fields != nil {
+			if note, _ := fields["note"].(string); strings.TrimSpace(note) != "" {
+				payload.Note = note
+			}
+			if disabled, okDisabled := fields["disabled"].(bool); okDisabled && disabled {
+				payload.Disabled = true
+			}
+			fields["oasis_token"] = token
+			if webid != "" {
+				fields["web_id"] = webid
+			}
+			fields["updated_at"] = payload.UpdatedAt
+			if merged, errM := json.MarshalIndent(fields, "", "  "); errM == nil {
+				if err := os.WriteFile(filePath, merged, 0o644); err == nil {
+					return payload, nil
+				}
+			}
+		}
+	}
+	data, _ := json.MarshalIndent(payload, "", "  ")
 	if err := os.WriteFile(filePath, data, 0o644); err != nil {
 		return AuthFilePayload{}, err
 	}

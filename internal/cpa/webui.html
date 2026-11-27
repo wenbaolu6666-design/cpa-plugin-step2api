@@ -282,7 +282,7 @@ function render() {
     else if (a.cooling) status = '<span class="pill warn">冷却中</span>';
     else if (a.last_error) status = `<span class="pill warn" title="${esc(a.last_error)}">异常</span>`;
     return `<tr>
-      <td><b>${esc(a.name)}</b><div class="mono sub">${esc(a.oasis_id || a.id)}</div></td>
+      <td><b>${esc(a.name)}</b><div class="mono sub">${esc(a.oasis_id || a.id)}</div>${a.note ? `<div class="sub" title="账号备注">📝 ${esc(a.note)}</div>` : ""}</td>
       <td>${status}</td>
       <td class="sub">${esc(expText)}</td>
       <td><span class="pill ${rpill}">${esc(rtext)}</span></td>
@@ -292,6 +292,7 @@ function render() {
         <button data-act="test" data-id="${esc(a.id)}">测试</button>
         <button data-act="refresh" data-id="${esc(a.id)}">续期</button>
         <button data-act="${a.disabled ? "enable" : "disable"}" data-id="${esc(a.id)}">${a.disabled ? "启用" : "停用"}</button>
+        <button data-act="note" data-id="${esc(a.id)}" data-note="${esc(a.note || "")}">备注</button>
         <button class="danger" data-act="delete" data-id="${esc(a.id)}">删除</button>
       </div></td></tr>`;
   }).join("") : '<tr><td colspan="7" class="empty">还没有账号。粘贴 Cookie 或 Oasis-Token 添加。</td></tr>';
@@ -398,6 +399,13 @@ document.addEventListener("click", async (ev) => {
     } else if (act === "test") {
       const r = await api("/v0/management/step2api/api/accounts/test", {method: "POST", body: JSON.stringify({id})});
       toast(r.ok ? (r.message || "连通正常，StepFun 链路健康！") : ("测试失败：" + (r.detail || r.error)), !r.ok);
+      await refresh(); return;
+    } else if (act === "note") {
+      const current = btn.dataset.note || "";
+      const next = prompt("账号备注（留空清除）", current);
+      if (next === null) return;
+      await api("/v0/management/step2api/api/accounts/note", {method: "POST", body: JSON.stringify({id, note: next})});
+      toast("备注已保存");
       await refresh(); return;
     } else if (act === "refresh") {
       const r = await api("/v0/management/step2api/api/accounts/refresh", {method: "POST", body: JSON.stringify({id})});

@@ -103,3 +103,48 @@ func TestAuthLoginPollIgnoresExistingAccounts(t *testing.T) {
 		t.Fatalf("status = %q, want pending", pollResponse.Status)
 	}
 }
+
+func TestAccountNoteEndpoint(t *testing.T) {
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	if err := os.Chdir(workDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldDir)
+	if err := os.MkdirAll("oauth", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join("oauth", "step2api-demo.json")
+	original := []byte(`{"type":"step2api","account_id":"demo","name":"demo","oasis_token":"a...b","note":"old","prefix":"keep"}`)
+	if err := os.WriteFile(authPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plugin := NewPlugin(nil)
+	body := []byte(`{"id":"demo","note":"新备注"}`)
+	raw, _ := json.Marshal(struct {
+		Method string `json:"method"`
+		Path   string `json:"path"`
+		Body   []byte `json:"body"`
+	}{Method: "POST", Path: "/v0/management/step2api/api/accounts/note", Body: body})
+	if _, err := plugin.handleManagementHandle(raw); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(updated, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["note"] != "新备注" {
+		t.Fatalf("note = %v", fields["note"])
+	}
+	if fields["prefix"] != "keep" {
+		t.Fatalf("unrelated field lost: %v", fields)
+	}
+}

@@ -70,6 +70,7 @@ func (p *Plugin) handleManagementRegister(raw []byte) (any, error) {
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/browser-login", Description: "Start isolated browser login"},
 			{Method: http.MethodGet, Path: "/v0/management/step2api/api/accounts/browser-login", Description: "Get isolated browser login status"},
 			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/browser-login/cancel", Description: "Cancel isolated browser login"},
+			{Method: http.MethodPost, Path: "/v0/management/step2api/api/accounts/note", Description: "Update account note"},
 		},
 		Resources: []pluginapi.ResourceRoute{
 			{
@@ -136,6 +137,7 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 						accountsList = append(accountsList, map[string]any{
 							"id":           item.AccountID,
 							"name":         item.Name,
+							"note":         item.Note,
 							"oasis_id":     item.WebID,
 							"webid":        item.WebID,
 							"token":        item.OasisToken,
@@ -319,6 +321,38 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
 	}
 
+	// 3.9 POST /api/accounts/note — store a per-account note in the auth file.
+	if strings.Contains(path, "/api/accounts/note") && method == http.MethodPost {
+		var in struct {
+			ID   string `json:"id"`
+			Note string `json:"note"`
+		}
+		_ = json.Unmarshal(req.Body, &in)
+		if strings.TrimSpace(in.ID) == "" {
+			return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Headers: headers, Body: []byte("{\"error\":\"id is required\"}")}, nil
+		}
+		fpath := filepath.Join(oauthDir, "step2api-"+in.ID+".json")
+		data, errRead := os.ReadFile(fpath)
+		if errRead != nil {
+			return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Headers: headers, Body: []byte("{\"error\":\"account not found\"}")}, nil
+		}
+		var fields map[string]any
+		if errJSON := json.Unmarshal(data, &fields); errJSON != nil || fields == nil {
+			return pluginapi.ManagementResponse{StatusCode: http.StatusInternalServerError, Headers: headers, Body: []byte("{\"error\":\"invalid auth file\"}")}, nil
+		}
+		note := strings.TrimSpace(in.Note)
+		if note == "" {
+			delete(fields, "note")
+		} else {
+			fields["note"] = note
+		}
+		fields["updated_at"] = time.Now().Format(time.RFC3339)
+		if updated, errM := json.MarshalIndent(fields, "", "  "); errM == nil {
+			_ = os.WriteFile(fpath, updated, 0644)
+		}
+		res, _ := json.Marshal(map[string]any{"ok": true, "id": in.ID, "note": note})
+		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
+	}
 	// 4. POST /api/accounts/delete
 	if (strings.Contains(path, "/api/accounts/delete") && method == http.MethodPost) ||
 		(strings.Contains(path, "/api/accounts") && method == http.MethodDelete) {
