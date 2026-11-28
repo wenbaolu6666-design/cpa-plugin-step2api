@@ -49,6 +49,13 @@ func (p *Plugin) upstreamWaitBudget() time.Duration {
 	return concurrencyRetryBudget
 }
 
+func (p *Plugin) drainTimeout() time.Duration {
+	if secs := p.Config().UpstreamDrainSeconds; secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return upstreamBackgroundDrainTimeout
+}
+
 func (p *Plugin) studioSlotChannel() chan struct{} {
 	capacity := p.Config().StudioMaxConcurrency
 	if capacity <= 0 {
@@ -711,7 +718,9 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 				}
 				earlyCut = true
 				_ = p.closeStream(streamID, nil)
-				go drainStudioStreamQuietly(eventsCh, errCh, cancel, upstreamBackgroundDrainTimeout)
+				// Keep the local slot until Studio reports done; aborting the
+				// stream early leaves the server-side concurrency slot held.
+				drainStudioStreamQuietly(eventsCh, errCh, cancel, p.drainTimeout())
 				return
 			}
 		}
@@ -806,7 +815,12 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	if slotErr != nil {
 		return nil, slotErr
 	}
-	defer releaseSlot()
+	slotTransferred := false
+	defer func() {
+		if !slotTransferred {
+			releaseSlot()
+		}
+	}()
 	eventsCh, errCh, err := startPlaygroundWithFallback(ctx, client, convID, req.Model, req.Payload, chatReq, extracted, p.upstreamWaitBudget())
 	if err != nil {
 		if !isConcurrencyLimitError(err) {
@@ -845,13 +859,21 @@ eventLoop:
 			}
 			if completedDeclaredTools > 0 && len(activeToolBlocks) == 0 {
 				earlyCut = true
-				go drainStudioStreamQuietly(eventsCh, errCh, cancel, upstreamBackgroundDrainTimeout)
+				slotTransferred = true
+				go func() {
+					defer releaseSlot()
+					drainStudioStreamQuietly(eventsCh, errCh, cancel, p.drainTimeout())
+				}()
 				break eventLoop
 			}
 		case stepstudio.EventTextDelta:
 			if completedDeclaredTools > 0 && len(activeToolBlocks) == 0 {
 				earlyCut = true
-				go drainStudioStreamQuietly(eventsCh, errCh, cancel, upstreamBackgroundDrainTimeout)
+				slotTransferred = true
+				go func() {
+					defer releaseSlot()
+					drainStudioStreamQuietly(eventsCh, errCh, cancel, p.drainTimeout())
+				}()
 				break eventLoop
 			}
 			var d stepstudio.DeltaData
@@ -861,7 +883,11 @@ eventLoop:
 		case stepstudio.EventReasoningDelta:
 			if completedDeclaredTools > 0 && len(activeToolBlocks) == 0 {
 				earlyCut = true
-				go drainStudioStreamQuietly(eventsCh, errCh, cancel, upstreamBackgroundDrainTimeout)
+				slotTransferred = true
+				go func() {
+					defer releaseSlot()
+					drainStudioStreamQuietly(eventsCh, errCh, cancel, p.drainTimeout())
+				}()
 				break eventLoop
 			}
 			var d stepstudio.DeltaData
@@ -916,7 +942,11 @@ eventLoop:
 				delete(suppressedBlocks, d.BlockIndex)
 				if completedDeclaredTools == 0 && len(activeToolBlocks) == 0 {
 					earlyCut = true
-					go drainStudioStreamQuietly(eventsCh, errCh, cancel, upstreamBackgroundDrainTimeout)
+					slotTransferred = true
+					go func() {
+						defer releaseSlot()
+						drainStudioStreamQuietly(eventsCh, errCh, cancel, p.drainTimeout())
+					}()
 					break eventLoop
 				}
 				break

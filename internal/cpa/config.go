@@ -10,7 +10,7 @@ const (
 	PluginID   = "step2api"
 	PluginName = "Step2API"
 	ProviderID = "step2api"
-	Version    = "1.0.64"
+	Version    = "1.0.65"
 )
 
 type PluginConfig struct {
@@ -31,6 +31,7 @@ type PluginConfig struct {
 	StudioMaxConcurrency  int    `yaml:"studio_max_concurrency"`
 	StudioSlotWaitSeconds int    `yaml:"studio_slot_wait_seconds"`
 	UpstreamWaitSeconds   int    `yaml:"upstream_concurrency_wait_seconds"`
+	UpstreamDrainSeconds  int    `yaml:"upstream_drain_timeout_seconds"`
 }
 
 func DefaultPluginConfig() PluginConfig {
@@ -50,6 +51,7 @@ func DefaultPluginConfig() PluginConfig {
 		StudioMaxConcurrency:  2,
 		StudioSlotWaitSeconds: 45,
 		UpstreamWaitSeconds:   90,
+		UpstreamDrainSeconds:  180,
 	}
 }
 
