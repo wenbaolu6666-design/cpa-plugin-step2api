@@ -30,6 +30,44 @@ func resolveOAuthDir() string {
 	return `../oauth`
 }
 
+// isSafeAccountID reports whether an account identifier can be used as a
+// single filename component. It rejects path separators, Windows-reserved
+// characters, control characters and parent-directory segments.
+func isSafeAccountID(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" || len(id) > 128 || strings.Contains(id, "..") {
+		return false
+	}
+	for _, r := range id {
+		if r < 0x20 {
+			return false
+		}
+		switch r {
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|':
+			return false
+		}
+	}
+	return true
+}
+
+// safeAccountPath resolves oauth/step2api-<id>.json and verifies containment.
+func safeAccountPath(oauthDir, id string) (string, bool) {
+	if !isSafeAccountID(id) {
+		return "", false
+	}
+	path := filepath.Join(oauthDir, "step2api-"+strings.TrimSpace(id)+".json")
+	absDir, errDir := filepath.Abs(oauthDir)
+	absPath, errPath := filepath.Abs(path)
+	if errDir != nil || errPath != nil {
+		return "", false
+	}
+	rel, errRel := filepath.Rel(absDir, absPath)
+	if errRel != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return path, true
+}
+
 func (p *Plugin) handleCLIRegister() (any, error) {
 	return pluginapi.CommandLineRegistrationResponse{
 		Flags: []pluginapi.CommandLineFlag{
@@ -239,7 +277,10 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			}
 		}
 		if accID != "" {
-			fpath := filepath.Join(oauthDir, "step2api-"+accID+".json")
+			fpath, okPath := safeAccountPath(oauthDir, accID)
+			if !okPath {
+				return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Headers: headers, Body: []byte("{\"error\":\"invalid account id\"}")}, nil
+			}
 			if data, err := os.ReadFile(fpath); err == nil {
 				var item map[string]any
 				if err := json.Unmarshal(data, &item); err == nil {
@@ -331,7 +372,10 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		if strings.TrimSpace(in.ID) == "" {
 			return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Headers: headers, Body: []byte("{\"error\":\"id is required\"}")}, nil
 		}
-		fpath := filepath.Join(oauthDir, "step2api-"+in.ID+".json")
+		fpath, okPath := safeAccountPath(oauthDir, in.ID)
+		if !okPath {
+			return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Headers: headers, Body: []byte("{\"error\":\"invalid account id\"}")}, nil
+		}
 		data, errRead := os.ReadFile(fpath)
 		if errRead != nil {
 			return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Headers: headers, Body: []byte("{\"error\":\"account not found\"}")}, nil
@@ -371,7 +415,10 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			}
 		}
 		if accID != "" {
-			filePath := filepath.Join(oauthDir, "step2api-"+accID+".json")
+			filePath, okPath := safeAccountPath(oauthDir, accID)
+			if !okPath {
+				return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Headers: headers, Body: []byte("{\"error\":\"invalid account id\"}")}, nil
+			}
 			_ = os.Remove(filePath)
 		}
 		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: []byte("{\"ok\":true,\"message\":\"账号已删除\"}")}, nil

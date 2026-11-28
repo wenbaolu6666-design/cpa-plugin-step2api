@@ -590,6 +590,9 @@ func saveStepFunAccount(oauthDir, name, token, webid string) (AuthFilePayload, e
 		}
 	}
 	accName := strings.TrimSpace(name)
+	if accName != "" && !isSafeAccountID(accName) {
+		return AuthFilePayload{}, errors.New("invalid account name: path separators and reserved characters are not allowed")
+	}
 	if accName == "" {
 		short := ""
 		if webid != "" {
