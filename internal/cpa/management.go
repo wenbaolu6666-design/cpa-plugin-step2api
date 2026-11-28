@@ -3,6 +3,7 @@ package cpa
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -276,20 +277,26 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 				}
 			}
 		}
-		if accID != "" {
-			fpath, okPath := safeAccountPath(oauthDir, accID)
-			if !okPath {
-				return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Headers: headers, Body: []byte("{\"error\":\"invalid account id\"}")}, nil
-			}
-			if data, err := os.ReadFile(fpath); err == nil {
-				var item map[string]any
-				if err := json.Unmarshal(data, &item); err == nil {
-					item["disabled"] = in.Disabled
-					if updated, errM := json.MarshalIndent(item, "", "  "); errM == nil {
-						_ = os.WriteFile(fpath, updated, 0644)
-					}
-				}
-			}
+		root, fpath, err := openAccountFile(oauthDir, accID)
+		if err != nil {
+			return accountOperationError(headers, err), nil
+		}
+		defer root.Close()
+		data, err := root.ReadFile(fpath)
+		if err != nil {
+			return accountOperationError(headers, err), nil
+		}
+		var item map[string]any
+		if err := json.Unmarshal(data, &item); err != nil || item == nil {
+			return pluginapi.ManagementResponse{StatusCode: http.StatusInternalServerError, Headers: headers, Body: []byte(`{"error":"invalid auth file"}`)}, nil
+		}
+		item["disabled"] = in.Disabled
+		updated, err := json.MarshalIndent(item, "", "  ")
+		if err != nil {
+			return accountOperationError(headers, err), nil
+		}
+		if err := root.WriteFile(fpath, updated, 0600); err != nil {
+			return accountOperationError(headers, err), nil
 		}
 		msg := "已启用"
 		if in.Disabled {
@@ -347,6 +354,9 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		}
 
 		payload, saveErr := saveStepFunAccount(oauthDir, in.Name, tok, webid)
+		if errors.Is(saveErr, errInvalidAccountID) {
+			return accountOperationError(headers, saveErr), nil
+		}
 		if saveErr != nil {
 			errBody, _ := json.Marshal(map[string]any{"error": "写入凭据文件失败: " + saveErr.Error()})
 			return pluginapi.ManagementResponse{StatusCode: http.StatusInternalServerError, Headers: headers, Body: errBody}, nil
@@ -369,16 +379,14 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			Note string `json:"note"`
 		}
 		_ = json.Unmarshal(req.Body, &in)
-		if strings.TrimSpace(in.ID) == "" {
-			return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Headers: headers, Body: []byte("{\"error\":\"id is required\"}")}, nil
+		root, fpath, err := openAccountFile(oauthDir, in.ID)
+		if err != nil {
+			return accountOperationError(headers, err), nil
 		}
-		fpath, okPath := safeAccountPath(oauthDir, in.ID)
-		if !okPath {
-			return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Headers: headers, Body: []byte("{\"error\":\"invalid account id\"}")}, nil
-		}
-		data, errRead := os.ReadFile(fpath)
-		if errRead != nil {
-			return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Headers: headers, Body: []byte("{\"error\":\"account not found\"}")}, nil
+		defer root.Close()
+		data, err := root.ReadFile(fpath)
+		if err != nil {
+			return accountOperationError(headers, err), nil
 		}
 		var fields map[string]any
 		if errJSON := json.Unmarshal(data, &fields); errJSON != nil || fields == nil {
@@ -392,7 +400,9 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		}
 		fields["updated_at"] = time.Now().Format(time.RFC3339)
 		if updated, errM := json.MarshalIndent(fields, "", "  "); errM == nil {
-			_ = os.WriteFile(fpath, updated, 0644)
+			if err := root.WriteFile(fpath, updated, 0600); err != nil {
+				return accountOperationError(headers, err), nil
+			}
 		}
 		res, _ := json.Marshal(map[string]any{"ok": true, "id": in.ID, "note": note})
 		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: res}, nil
@@ -414,12 +424,13 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 				}
 			}
 		}
-		if accID != "" {
-			filePath, okPath := safeAccountPath(oauthDir, accID)
-			if !okPath {
-				return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Headers: headers, Body: []byte("{\"error\":\"invalid account id\"}")}, nil
-			}
-			_ = os.Remove(filePath)
+		root, name, err := openAccountFile(oauthDir, accID)
+		if err != nil {
+			return accountOperationError(headers, err), nil
+		}
+		defer root.Close()
+		if err := root.Remove(name); err != nil {
+			return accountOperationError(headers, err), nil
 		}
 		return pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: headers, Body: []byte("{\"ok\":true,\"message\":\"账号已删除\"}")}, nil
 	}
@@ -431,9 +442,19 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		}
 		_ = json.Unmarshal(req.Body, &in)
 		refreshedCount := 0
+		root, err := os.OpenRoot(oauthDir)
+		if err != nil {
+			return accountOperationError(headers, err), nil
+		}
+		defer root.Close()
 		if files, err := filepath.Glob(filepath.Join(oauthDir, "step2api-*.json")); err == nil {
 			for _, fpath := range files {
-				data, err := os.ReadFile(fpath)
+				name := filepath.Base(fpath)
+				info, err := root.Lstat(name)
+				if err != nil || !info.Mode().IsRegular() {
+					continue
+				}
+				data, err := root.ReadFile(name)
 				if err != nil {
 					continue
 				}
@@ -449,8 +470,9 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 					item.OasisToken = newTok
 					item.UpdatedAt = time.Now().Format(time.RFC3339)
 					if updatedBytes, errM := json.MarshalIndent(item, "", "  "); errM == nil {
-						_ = os.WriteFile(fpath, updatedBytes, 0644)
-						refreshedCount++
+						if root.WriteFile(name, updatedBytes, 0600) == nil {
+							refreshedCount++
+						}
 					}
 				}
 			}
@@ -486,4 +508,16 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		Headers:    headers,
 		Body:       []byte("{\"error\":\"not_found\"}"),
 	}, nil
+}
+
+func accountOperationError(headers http.Header, err error) pluginapi.ManagementResponse {
+	status, message := http.StatusInternalServerError, "account file operation failed"
+	switch {
+	case errors.Is(err, errInvalidAccountID):
+		status, message = http.StatusBadRequest, "invalid account id"
+	case errors.Is(err, os.ErrNotExist):
+		status, message = http.StatusNotFound, "account not found"
+	}
+	body, _ := json.Marshal(map[string]string{"error": message})
+	return pluginapi.ManagementResponse{StatusCode: status, Headers: headers, Body: body}
 }
