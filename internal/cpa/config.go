@@ -10,7 +10,7 @@ const (
 	PluginID   = "step2api"
 	PluginName = "Step2API"
 	ProviderID = "step2api"
-	Version    = "1.0.63"
+	Version    = "1.0.64"
 )
 
 type PluginConfig struct {
@@ -28,6 +28,9 @@ type PluginConfig struct {
 	DataDir               string `yaml:"data_dir"`
 	BrowserPath           string `yaml:"browser_path"`
 	LoginTimeoutSeconds   int    `yaml:"login_timeout_seconds"`
+	StudioMaxConcurrency  int    `yaml:"studio_max_concurrency"`
+	StudioSlotWaitSeconds int    `yaml:"studio_slot_wait_seconds"`
+	UpstreamWaitSeconds   int    `yaml:"upstream_concurrency_wait_seconds"`
 }
 
 func DefaultPluginConfig() PluginConfig {
@@ -44,6 +47,9 @@ func DefaultPluginConfig() PluginConfig {
 		SyncAuthFiles:         true,
 		DataDir:               "~/.step2api",
 		LoginTimeoutSeconds:   300,
+		StudioMaxConcurrency:  2,
+		StudioSlotWaitSeconds: 45,
+		UpstreamWaitSeconds:   90,
 	}
 }
 

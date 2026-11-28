@@ -109,6 +109,9 @@ plugins:
       sync_auth_files: true
       browser_path: ""            # 可选：指定 Chrome/Edge 可执行文件
       login_timeout_seconds: 300  # 可选：无痕登录等待时间
+      studio_max_concurrency: 2            # 可选：本机同时请求 Studio 的上限
+      studio_slot_wait_seconds: 45         # 可选：本机槽位排队时间
+      upstream_concurrency_wait_seconds: 90 # 可选：上游并发已满时的重试预算
 ```
 
 | 字段 | 默认值 | 说明 |
@@ -125,6 +128,9 @@ plugins:
 | `data_dir` | `~/.step2api` | 插件数据目录 |
 | `browser_path` | 空 | 官方登录使用的浏览器路径，留空自动探测 |
 | `login_timeout_seconds` | `300` | 官方登录等待超时 |
+| `studio_max_concurrency` | `2` | 本机同时发给 Studio 的最大请求数；设为 `1` 可完全串行 |
+| `studio_slot_wait_seconds` | `45` | 本机槽位占用时最多排队多久，超时才返回 409 |
+| `upstream_concurrency_wait_seconds` | `90` | 上游返回并发已满时的继续重试预算 |
 
 浏览器自动探测顺序：Chrome → Chromium → Edge → Brave；也可用环境变量
 `STEP2API_CHROME_PATH` / `CHROME_PATH` / `BROWSER_PATH` 指定。

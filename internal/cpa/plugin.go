@@ -57,6 +57,9 @@ type Plugin struct {
 	browserLoginMu     sync.Mutex
 	browserLogin       *BrowserLoginSession
 	browserLoginCancel context.CancelFunc
+
+	slotMu sync.Mutex
+	slots  chan struct{}
 }
 
 func NewPlugin(hostCall HostCallFunc) *Plugin {

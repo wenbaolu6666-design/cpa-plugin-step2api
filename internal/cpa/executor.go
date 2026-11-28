@@ -40,18 +40,53 @@ const (
 	studioSlotWait          = 8 * time.Second
 )
 
-var studioSlots = make(chan struct{}, 2)
+// studioSlotChannel returns the local concurrency gate, rebuilt when the
+// configured capacity changes (plugin hot reload).
+func (p *Plugin) upstreamWaitBudget() time.Duration {
+	if secs := p.Config().UpstreamWaitSeconds; secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return concurrencyRetryBudget
+}
 
-func acquireStudioSlot(ctx context.Context) (func(), error) {
-	timer := time.NewTimer(studioSlotWait)
+func (p *Plugin) studioSlotChannel() chan struct{} {
+	capacity := p.Config().StudioMaxConcurrency
+	if capacity <= 0 {
+		capacity = 1
+	}
+	if capacity > 16 {
+		capacity = 16
+	}
+	p.slotMu.Lock()
+	defer p.slotMu.Unlock()
+	if p.slots == nil || cap(p.slots) != capacity {
+		p.slots = make(chan struct{}, capacity)
+	}
+	return p.slots
+}
+
+// acquireStudioSlot queues for a local Studio slot. Requests wait up to
+// studio_slot_wait_seconds instead of failing immediately, so a short burst
+// only slows down rather than returning 409 to the client.
+func (p *Plugin) acquireStudioSlot(ctx context.Context) (func(), error) {
+	slots := p.studioSlotChannel()
+	wait := time.Duration(p.Config().StudioSlotWaitSeconds) * time.Second
+	if wait <= 0 {
+		wait = 45 * time.Second
+	}
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
-	case studioSlots <- struct{}{}:
-		return func() { <-studioSlots }, nil
+	case slots <- struct{}{}:
+		return func() { <-slots }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-timer.C:
-		return nil, pluginabi.NewError("upstream_concurrency", "StepFun Studio 并发已满，请切换其他模型或稍后重试", http.StatusConflict)
+		return nil, pluginabi.NewError(
+			"upstream_concurrency",
+			fmt.Sprintf("StepFun Studio 并发已满：本机已排队等待 %s（上限 %d 个并发）。请稍后重试，或调低 studio_max_concurrency", wait, cap(slots)),
+			http.StatusConflict,
+		)
 	}
 }
 func isInvalidBodyError(err error) bool {
@@ -336,7 +371,7 @@ func pluginErrorFromUpstreamErr(err error) *pluginabi.Error {
 		// 429/503 are retried by CPA Core for minutes (request-retry), which
 		// looks like a stalled request. 409 is outside the retry list and
 		// surfaces the concurrency message immediately.
-		return pluginabi.NewError("upstream_concurrency", "StepFun Studio 并发已满（"+apiErr.Message+"），请切换其他模型或稍后重试", http.StatusConflict)
+		return pluginabi.NewError("upstream_concurrency", "StepFun Studio 并发已满（"+apiErr.Message+"）。插件已自动排队重试仍未拿到槽位；可调低 studio_max_concurrency、加大 upstream_concurrency_wait_seconds，或稍后重试", http.StatusConflict)
 	}
 	if status == http.StatusTooManyRequests {
 		return pluginabi.NewError("upstream_rate_limited", "StepFun 上游限流: "+apiErr.Message, http.StatusTooManyRequests)
@@ -495,8 +530,12 @@ func streamWithConcurrencyRetry(
 	client *stepstudio.Client,
 	convID string,
 	req stepstudio.PlaygroundChatRequest,
+	budget time.Duration,
 ) (<-chan stepstudio.StudioEvent, <-chan error, error) {
-	deadline := time.Now().Add(concurrencyRetryBudget)
+	if budget <= 0 {
+		budget = concurrencyRetryBudget
+	}
+	deadline := time.Now().Add(budget)
 	delay := concurrencyRetryInitial
 	for {
 		eventsCh, errCh, err := client.StreamPlayground(ctx, convID, req)
@@ -535,16 +574,17 @@ func startPlaygroundWithFallback(
 	rawPayload []byte,
 	baseReq stepstudio.PlaygroundChatRequest,
 	extracted *translator.ExtractedRequest,
+	budget time.Duration,
 ) (<-chan stepstudio.StudioEvent, <-chan error, error) {
 	fitted := fitPlaygroundChatRequest(convID, baseReq, extracted.BaseSystem, extracted.ToolProtocol, maxStudioRequestBodyBytes)
-	eventsCh, errCh, err := streamWithConcurrencyRetry(ctx, client, convID, fitted)
+	eventsCh, errCh, err := streamWithConcurrencyRetry(ctx, client, convID, fitted, budget)
 	if err != nil && isSafetyReviewError(err) {
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
 		case <-time.After(800 * time.Millisecond):
 		}
-		eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, fitted)
+		eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, fitted, budget)
 		if err != nil && isSafetyReviewError(err) {
 			soft := extracted.SoftToolProtocol
 			if soft == "" {
@@ -553,19 +593,19 @@ func startPlaygroundWithFallback(
 			softReq := baseReq
 			softReq.EnableWebSearch = false
 			softReq = fitPlaygroundChatRequest(convID, softReq, "", soft, 300*1024)
-			eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, softReq)
+			eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, softReq, budget)
 		}
 	}
 	if err != nil && isInvalidBodyError(err) {
 		retryReq := baseReq
 		retryReq.EnableWebSearch = false
 		retryReq = fitPlaygroundChatRequest(convID, retryReq, extracted.BaseSystem, extracted.ToolProtocol, 450*1024)
-		eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, retryReq)
+		eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, retryReq, budget)
 		if err != nil && isInvalidBodyError(err) {
 			retryReq2 := baseReq
 			retryReq2.EnableWebSearch = false
 			retryReq2 = fitPlaygroundChatRequest(convID, retryReq2, "", extracted.ToolProtocol, 150*1024)
-			eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, retryReq2)
+			eventsCh, errCh, err = streamWithConcurrencyRetry(ctx, client, convID, retryReq2, budget)
 		}
 	}
 	return eventsCh, errCh, err
@@ -625,12 +665,12 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		EnableWebSearch: extracted.EnableWebSearch,
 	}
 
-	releaseSlot, slotErr := acquireStudioSlot(ctx)
+	releaseSlot, slotErr := p.acquireStudioSlot(ctx)
 	if slotErr != nil {
 		cancel()
 		return nil, slotErr
 	}
-	eventsCh, errCh, err := startPlaygroundWithFallback(ctx, client, convID, req.Model, req.Payload, chatReq, extracted)
+	eventsCh, errCh, err := startPlaygroundWithFallback(ctx, client, convID, req.Model, req.Payload, chatReq, extracted, p.upstreamWaitBudget())
 	if err != nil {
 		cancel()
 		releaseSlot()
@@ -762,12 +802,12 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		EnableWebSearch: extracted.EnableWebSearch,
 	}
 
-	releaseSlot, slotErr := acquireStudioSlot(ctx)
+	releaseSlot, slotErr := p.acquireStudioSlot(ctx)
 	if slotErr != nil {
 		return nil, slotErr
 	}
 	defer releaseSlot()
-	eventsCh, errCh, err := startPlaygroundWithFallback(ctx, client, convID, req.Model, req.Payload, chatReq, extracted)
+	eventsCh, errCh, err := startPlaygroundWithFallback(ctx, client, convID, req.Model, req.Payload, chatReq, extracted, p.upstreamWaitBudget())
 	if err != nil {
 		if !isConcurrencyLimitError(err) {
 			p.noteStudioUpstreamFailure(cleanModel, err)
