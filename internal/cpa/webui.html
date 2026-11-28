@@ -574,14 +574,6 @@ $("btn-save-settings").onclick = async () => {
 };
 
 (async function boot() {
-  // Any service worker on this origin is a leftover from whatever served this port
-  // before (we ship none, and /sw.js 404s). Left alone it keeps serving a stale
-  // panel -- including old admin responses that make a dead session look alive.
-  if (navigator.serviceWorker) {
-    navigator.serviceWorker.getRegistrations()
-      .then(rs => rs.forEach(r => r.unregister()))
-      .catch(() => {});
-  }
   getCPAKey();
   try { await refresh(); }
   catch (e) { toast("加载状态失败: " + e.message, true); }

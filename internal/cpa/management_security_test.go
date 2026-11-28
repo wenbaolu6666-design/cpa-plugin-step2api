@@ -106,3 +106,23 @@ func TestManagementRegistrationRouteBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountFilenameUsesOnePortableComponent(t *testing.T) {
+	for _, id := range []string{"team-01", "Test Account", "工作账号", "example.test"} {
+		got, err := accountFilename(id)
+		if err != nil || got != "step2api-"+id+".json" {
+			t.Errorf("valid account ID %q: filename=%q, err=%v", id, got, err)
+		}
+	}
+	for _, id := range []string{"", " padded ", "first/second", "first\\second", "two:parts", "control\ncharacter"} {
+		if got, err := accountFilename(id); err != errInvalidAccountID || got != "" {
+			t.Errorf("invalid account ID %q: filename=%q, err=%v", id, got, err)
+		}
+	}
+}
+
+func TestResourcePageDoesNotChangeServiceWorkerRegistrations(t *testing.T) {
+	if strings.Contains(webUIDashboardHTML, "navigator.serviceWorker") {
+		t.Fatal("static resource page must not modify service worker registrations")
+	}
+}

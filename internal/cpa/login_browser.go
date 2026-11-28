@@ -613,9 +613,13 @@ func saveStepFunAccount(oauthDir, name, token, webid string) (AuthFilePayload, e
 		WebID:         webid,
 		UpdatedAt:     time.Now().Format(time.RFC3339),
 	}
-	filePath := filepath.Join(oauthDir, "step2api-"+accName+".json")
+	root, filePath, err := openAccountFile(oauthDir, accName)
+	if err != nil {
+		return AuthFilePayload{}, err
+	}
+	defer root.Close()
 	// Re-login and re-import must keep user-owned fields such as note/tags/prefix.
-	if existing, errRead := os.ReadFile(filePath); errRead == nil {
+	if existing, errRead := root.ReadFile(filePath); errRead == nil {
 		var fields map[string]any
 		if json.Unmarshal(existing, &fields) == nil && fields != nil {
 			if note, _ := fields["note"].(string); strings.TrimSpace(note) != "" {
@@ -630,14 +634,14 @@ func saveStepFunAccount(oauthDir, name, token, webid string) (AuthFilePayload, e
 			}
 			fields["updated_at"] = payload.UpdatedAt
 			if merged, errM := json.MarshalIndent(fields, "", "  "); errM == nil {
-				if err := os.WriteFile(filePath, merged, 0o644); err == nil {
+				if err := root.WriteFile(filePath, merged, 0o600); err == nil {
 					return payload, nil
 				}
 			}
 		}
 	}
 	data, _ := json.MarshalIndent(payload, "", "  ")
-	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+	if err := root.WriteFile(filePath, data, 0o600); err != nil {
 		return AuthFilePayload{}, err
 	}
 	return payload, nil
